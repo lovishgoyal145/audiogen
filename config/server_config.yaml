@@ -1,0 +1,23 @@
+server:
+  host: "0.0.0.0"
+  port: 17000
+  auth_token_env: "SERVER_BEARER_TOKEN"
+  secret_header_name: "X-Server-Secret"
+
+watchdog:
+  idle_timeout_seconds: 600
+  check_interval_seconds: 1.0
+  pkill_target: "jupyter"
+
+tunnel:
+  target_url: "http://localhost:17000"
+  binary: "cloudflared"
+  startup_timeout_seconds: 30.0
+
+publisher:
+  webhook_url_env: "TUNNEL_REGISTRY_WEBHOOK_URL"
+  timeout_seconds: 10.0
+
+model:
+  device: null  # auto-detect cuda vs cpu
+  sample_rate: 24000

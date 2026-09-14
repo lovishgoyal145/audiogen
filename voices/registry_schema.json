@@ -1,0 +1,17 @@
+{
+  "anchor_male_energetic": {
+    "path": "voices/refs/anchor_male_energetic.wav",
+    "language": ["hi", "pa"],
+    "description": "Energetic male anchor reference voice suitable for news and announcements"
+  },
+  "anchor_female_calm": {
+    "path": "voices/refs/anchor_female_calm.wav",
+    "language": ["hi"],
+    "description": "Calm and articulate female reference voice for narrative and instructional audio"
+  },
+  "storyteller_punjabi_elder": {
+    "path": "voices/refs/storyteller_punjabi_elder.wav",
+    "language": ["pa"],
+    "description": "Mature elder male reference voice for Punjabi storytelling and folklore"
+  }
+}
