@@ -1,16 +1,19 @@
 {
   "anchor_male_energetic": {
     "path": "voices/refs/anchor_male_energetic.wav",
+    "ref_text": "ਭਹੰਪੀ ਵਿੱਚ ਸਮਾਰਕਾਂ ਦੇ ਭਵਨ ਨਿਰਮਾਣ ਕਲਾ ਦੇ ਵੇਰਵੇ ਗੁੰਝਲਦਾਰ ਅਤੇ ਹੈਰਾਨ ਕਰਨ ਵਾਲੇ ਹਨ, ਜੋ ਮੈਨੂੰ ਖੁਸ਼ ਕਰਦੇ ਹਨ।",
     "language": ["hi", "pa"],
     "description": "Energetic male anchor reference voice suitable for news and announcements"
   },
   "anchor_female_calm": {
     "path": "voices/refs/anchor_female_calm.wav",
+    "ref_text": "नमस्ते! संगीत की तरह जीवन भी खूबसूरत होता है, बस इसे सही ताल में जीना आना चाहिए।",
     "language": ["hi"],
     "description": "Calm and articulate female reference voice for narrative and instructional audio"
   },
   "storyteller_punjabi_elder": {
     "path": "voices/refs/storyteller_punjabi_elder.wav",
+    "ref_text": "ਇੱਕ ਵਾਰ ਦੀ ਗੱਲ ਹੈ, ਪੁਰਾਣੇ ਪਿੰਡ ਵਿੱਚ ਇੱਕ ਬਜ਼ੁਰਗ ਕਹਾਣੀਕਾਰ ਰਹਿੰਦਾ ਸੀ ਜੋ ਸਭ ਨੂੰ ਪ੍ਰੇਰਿਤ ਕਰਦਾ ਸੀ।",
     "language": ["pa"],
     "description": "Mature elder male reference voice for Punjabi storytelling and folklore"
   }

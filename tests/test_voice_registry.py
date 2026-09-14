@@ -1,15 +1,15 @@
-"""Unit test suite for voice registry (Ticket 004)."""
+"""Unit test suite for voice registry with IndicF5 VoiceRecord support."""
 
 from __future__ import annotations
 
 import concurrent.futures
 import json
 import os
-import struct
-import wave
 from pathlib import Path
+import struct
 from typing import Any, Dict, Generator
 from unittest.mock import patch
+import wave
 
 import pytest
 
@@ -19,6 +19,7 @@ from voices.registry import (
     REPO_ROOT,
     VOICE_DIR,
     VoiceNotFoundError,
+    VoiceRecord,
     clear_registry_cache,
     get_voice_metadata,
     get_voice_ref,
@@ -70,21 +71,25 @@ def mock_manifest_file(temp_voice_workspace: Path) -> Path:
     manifest_data: Dict[str, Any] = {
         "voice_hi_only": {
             "path": "refs/v1.wav",
+            "ref_text": "नमस्ते भारत, यह एक परीक्षण है।",
             "language": ["hi"],
             "description": "Hindi only voice",
         },
         "voice_pa_only": {
             "path": "refs/v2.wav",
+            "ref_text": "ਸਤਿ ਸ਼੍ਰੀ ਅਕਾਲ ਜੀ, ਇਹ ਇਕ ਟੈਸਟ ਹੈ।",
             "language": ["pa"],
             "description": "Punjabi only voice",
         },
         "voice_bilingual": {
             "path": "refs/v3.wav",
+            "ref_text": "नमस्ते और ਸਤਿ ਸ਼੍ਰੀ ਅਕਾਲ ਦੋਵਾਂ ਭਾਸ਼ਾਵਾਂ ਲਈ।",
             "language": ["hi", "pa"],
             "description": "Bilingual voice",
         },
         "voice_string_lang": {
             "path": "refs/v4.wav",
+            "ref_text": "नमस्ते यह स्ट्रिंग भाषा का परीक्षण है।",
             "language": "hi",
             "description": "Voice with string language representation",
         },
@@ -101,6 +106,7 @@ def missing_ref_manifest(temp_voice_workspace: Path) -> Path:
     manifest_data = {
         "ghost_voice": {
             "path": "refs/ghost_voice.wav",
+            "ref_text": "यह एक भूतिया आवाज़ का परीक्षण है।",
             "language": ["hi"],
             "description": "Voice pointing to non-existent audio file",
         }
@@ -143,7 +149,7 @@ def test_voice_not_found_error_hierarchy() -> None:
 
 
 def test_default_manifest_loads_successfully() -> None:
-    """Verify default production manifest loads and contains required default voices."""
+    """Verify default production manifest loads and contains required default voices with transcripts."""
     manifest = load_manifest()
     assert isinstance(manifest, dict)
     assert "anchor_male_energetic" in manifest
@@ -153,6 +159,8 @@ def test_default_manifest_loads_successfully() -> None:
     # Check structure
     male = manifest["anchor_male_energetic"]
     assert "path" in male
+    assert "ref_text" in male
+    assert isinstance(male["ref_text"], str) and len(male["ref_text"]) > 0
     assert "language" in male
     assert isinstance(male["language"], list)
     assert "hi" in male["language"]
@@ -186,14 +194,14 @@ def test_load_manifest_missing_required_fields(tmp_path: Path) -> None:
     # Missing language
     p1 = tmp_path / "no_lang.json"
     with open(p1, "w", encoding="utf-8") as f:
-        json.dump({"bad_voice": {"path": "refs/v1.wav"}}, f)
+        json.dump({"bad_voice": {"path": "refs/v1.wav", "ref_text": "परीक्षण"}}, f)
     with pytest.raises(ValueError, match="missing required field"):
         load_manifest(p1)
 
     # Missing path
     p2 = tmp_path / "no_path.json"
     with open(p2, "w", encoding="utf-8") as f:
-        json.dump({"bad_voice": {"language": ["hi"]}}, f)
+        json.dump({"bad_voice": {"language": ["hi"], "ref_text": "परीक्षण"}}, f)
     with pytest.raises(ValueError, match="missing required field"):
         load_manifest(p2)
 
@@ -205,20 +213,77 @@ def test_load_manifest_missing_required_fields(tmp_path: Path) -> None:
         load_manifest(p3)
 
 
+def test_load_manifest_missing_ref_text_raises_value_error(tmp_path: Path) -> None:
+    """Verify loading manifest with missing ref_text raises ValueError."""
+    bad_manifest = tmp_path / "no_ref_text.json"
+    with open(bad_manifest, "w", encoding="utf-8") as f:
+        json.dump({"bad_voice": {"path": "refs/v1.wav", "language": ["hi"]}}, f)
+    with pytest.raises(ValueError, match="missing or empty required field: 'ref_text'"):
+        load_manifest(bad_manifest)
+
+
+def test_load_manifest_empty_ref_text_raises_value_error(tmp_path: Path) -> None:
+    """Verify loading manifest with empty or whitespace-only ref_text raises ValueError."""
+    bad_manifest = tmp_path / "empty_ref_text.json"
+    with open(bad_manifest, "w", encoding="utf-8") as f:
+        json.dump({"bad_voice": {"path": "refs/v1.wav", "ref_text": "   ", "language": ["hi"]}}, f)
+    with pytest.raises(ValueError, match="missing or empty required field: 'ref_text'"):
+        load_manifest(bad_manifest)
+
+
+def test_load_manifest_unsupported_language_raises_value_error(tmp_path: Path) -> None:
+    """Verify loading manifest with language other than hi/pa raises ValueError."""
+    bad_manifest = tmp_path / "unsupported_lang.json"
+    with open(bad_manifest, "w", encoding="utf-8") as f:
+        json.dump({"bad_voice": {"path": "refs/v1.wav", "ref_text": "Hello world", "language": ["en"]}}, f)
+    with pytest.raises(ValueError, match="Unsupported language 'en' in voice entry 'bad_voice'"):
+        load_manifest(bad_manifest)
+
+
 # ==============================================================================
 # 3. Reference Path Resolution & Lookup Tests
 # ==============================================================================
 
 
 def test_get_voice_ref_success() -> None:
-    """Verify get_voice_ref returns an absolute existing path for default voices."""
+    """Verify get_voice_ref returns VoiceRecord with valid attributes and dict access."""
     for voice_name in ["anchor_male_energetic", "anchor_female_calm", "storyteller_punjabi_elder"]:
-        ref_path = get_voice_ref(voice_name)
-        assert isinstance(ref_path, str)
-        assert os.path.isabs(ref_path)
-        assert Path(ref_path).exists()
-        assert Path(ref_path).is_file()
-        assert ref_path.endswith(f"{voice_name}.wav")
+        voice_rec = get_voice_ref(voice_name)
+        assert isinstance(voice_rec, VoiceRecord)
+        assert isinstance(voice_rec.path, str)
+        assert os.path.isabs(voice_rec.path)
+        assert Path(voice_rec.path).exists()
+        assert Path(voice_rec.path).is_file()
+        assert voice_rec.path.endswith(f"{voice_name}.wav")
+
+        assert isinstance(voice_rec.ref_text, str)
+        assert len(voice_rec.ref_text.strip()) > 0
+        assert isinstance(voice_rec.language, list)
+        assert len(voice_rec.language) > 0
+
+        # Dict-like indexing
+        assert voice_rec["path"] == voice_rec.path
+        assert voice_rec["ref_text"] == voice_rec.ref_text
+        assert voice_rec["language"] == voice_rec.language
+        assert voice_rec["description"] == voice_rec.description
+
+        # VoiceRecord with description=None returns None for ["description"]
+        rec_no_desc = VoiceRecord(path=voice_rec.path, ref_text=voice_rec.ref_text, language=voice_rec.language)
+        assert rec_no_desc["description"] is None
+
+        # Invalid key access restricted to valid fields
+        with pytest.raises(KeyError):
+            _ = voice_rec["non_existent_key"]
+        with pytest.raises(KeyError):
+            _ = voice_rec["to_dict"]
+
+        # to_dict conversion
+        d = voice_rec.to_dict()
+        assert isinstance(d, dict)
+        assert d["path"] == voice_rec.path
+        assert d["ref_text"] == voice_rec.ref_text
+        assert d["language"] == voice_rec.language
+
 
 
 def test_get_voice_ref_not_found() -> None:
@@ -245,6 +310,24 @@ def test_get_voice_ref_missing_file_on_disk(missing_ref_manifest: Path, monkeypa
         get_voice_ref("ghost_voice")
     assert "ghost_voice" in str(exc_info.value)
     assert "does not exist on disk" in str(exc_info.value)
+
+
+def test_get_voice_ref_corrupt_manifest_empty_ref_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify get_voice_ref rejects corrupt cache entries with missing/empty ref_text at lookup time."""
+    from voices import registry
+
+    corrupt_cache = {
+        "corrupt_voice": {
+            "path": "voices/refs/anchor_male_energetic.wav",
+            "ref_text": "  ",
+            "language": ["hi"],
+        }
+    }
+    monkeypatch.setattr(registry, "_REGISTRY_CACHE", corrupt_cache)
+    monkeypatch.setattr(registry, "_CACHED_MANIFEST_PATH", registry.resolve_manifest_path())
+    with pytest.raises(ValueError, match="Reference text \\(ref_text\\) is missing or empty for voice 'corrupt_voice'"):
+        get_voice_ref("corrupt_voice")
+
 
 
 # ==============================================================================
@@ -308,6 +391,8 @@ def test_get_voice_metadata_success() -> None:
     assert isinstance(meta, dict)
     assert meta["path"] == "voices/refs/anchor_male_energetic.wav"
     assert meta["language"] == ["hi", "pa"]
+    assert "ref_text" in meta
+    assert len(meta["ref_text"]) > 0
     assert "description" in meta
 
     # Ensure immutability / shallow copy isolation
@@ -380,7 +465,7 @@ def test_concurrent_multithreaded_lookups() -> None:
         try:
             for _ in range(20):
                 ref = get_voice_ref("anchor_male_energetic")
-                assert os.path.exists(ref)
+                assert os.path.exists(ref.path)
                 voices = list_voices("hi")
                 assert "anchor_male_energetic" in voices
                 meta = get_voice_metadata("anchor_female_calm")
@@ -409,3 +494,4 @@ def test_cache_immutability_and_deep_isolation() -> None:
     meta["language"].append("de")
     fresh_meta = get_voice_metadata("anchor_male_energetic")
     assert "de" not in fresh_meta["language"]
+

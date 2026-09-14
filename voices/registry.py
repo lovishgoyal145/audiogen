@@ -7,10 +7,11 @@ to their reference audio files on disk with language filtering and fail-fast val
 from __future__ import annotations
 
 import copy
+from dataclasses import dataclass
 import json
 import os
-import threading
 from pathlib import Path
+import threading
 from typing import Any, Dict, Final, List, Optional, Union
 
 
@@ -18,6 +19,38 @@ class VoiceNotFoundError(KeyError):
     """Raised when a requested voice name is not present in the voice registry manifest."""
 
     pass
+
+
+@dataclass(frozen=True)
+class VoiceRecord:
+    """Immutable voice record containing reference audio path, transcript, and languages."""
+
+    path: str
+    ref_text: str
+    language: List[str]
+    description: Optional[str] = None
+
+    def __getitem__(self, item: str) -> Any:
+        """Provide dictionary key access for backward compatibility."""
+        if item in {"path", "ref_text", "language", "description"}:
+            return getattr(self, item)
+        raise KeyError(item)
+
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert voice record to a standard dictionary."""
+        d: Dict[str, Any] = {
+            "path": self.path,
+            "ref_text": self.ref_text,
+            "language": list(self.language),
+        }
+        if self.description is not None:
+            d["description"] = self.description
+        return d
+
+    def __fspath__(self) -> str:
+        """Allow VoiceRecord to be used where a path-like object is expected."""
+        return self.path
 
 
 # Default path resolution constants
@@ -122,6 +155,13 @@ def load_manifest(
             if "path" not in metadata or "language" not in metadata:
                 raise ValueError(f"Voice entry '{voice_name}' missing required field: 'path' or 'language'")
 
+            if (
+                "ref_text" not in metadata
+                or not isinstance(metadata["ref_text"], str)
+                or not metadata["ref_text"].strip()
+            ):
+                raise ValueError(f"Voice entry '{voice_name}' missing or empty required field: 'ref_text'")
+
             entry = metadata.copy()
             lang = entry["language"]
             if isinstance(lang, str):
@@ -131,6 +171,11 @@ def load_manifest(
             else:
                 raise ValueError(f"Voice entry '{voice_name}' has invalid 'language' type: {type(lang).__name__}")
 
+            for l in entry["language"]:
+                if l not in {"hi", "pa"}:
+                    raise ValueError(f"Unsupported language '{l}' in voice entry '{voice_name}'")
+
+            entry["ref_text"] = entry["ref_text"].strip()
             processed[voice_name] = entry
 
         _REGISTRY_CACHE = processed
@@ -149,21 +194,23 @@ def clear_registry_cache() -> None:
         _CACHED_MANIFEST_PATH = None
 
 
-def get_voice_ref(voice_name: str) -> str:
-    """Retrieve the absolute file path to the reference audio for a given voice.
+def get_voice_ref(voice_name: str) -> VoiceRecord:
+    """Retrieve the VoiceRecord for a given voice.
 
-    Validates that the voice name exists in the manifest and that the referenced
-    audio file exists on disk. Fails fast if either condition is not met.
+    Validates that the voice name exists in the manifest, the reference text is
+    valid, and the referenced audio file exists on disk. Fails fast if any
+    condition is not met.
 
     Args:
         voice_name: Unique voice identifier key (e.g. 'anchor_male_energetic').
 
     Returns:
-        Absolute string path to the existing reference audio file on disk.
+        VoiceRecord containing path, ref_text, and language list.
 
     Raises:
         TypeError: If voice_name is not a string.
         VoiceNotFoundError: If voice_name is not in the registry manifest (inherits from KeyError).
+        ValueError: If ref_text is missing or empty.
         FileNotFoundError: If the voice exists in manifest but its audio file is missing on disk.
     """
     if not isinstance(voice_name, str):
@@ -174,7 +221,14 @@ def get_voice_ref(voice_name: str) -> str:
     if voice_name not in manifest:
         raise VoiceNotFoundError(f"Voice '{voice_name}' not found in voice registry manifest.")
 
-    raw_path_str = manifest[voice_name].get("path")
+    entry = manifest[voice_name]
+    ref_text = entry.get("ref_text")
+    if not ref_text or not isinstance(ref_text, str) or not ref_text.strip():
+        raise ValueError(
+            f"Reference text (ref_text) is missing or empty for voice '{voice_name}'. Corrupt manifest entry."
+        )
+
+    raw_path_str = entry.get("path")
     if not raw_path_str:
         raise FileNotFoundError(f"Reference audio file path for voice '{voice_name}' is empty.")
 
@@ -202,7 +256,12 @@ def get_voice_ref(voice_name: str) -> str:
             f"Reference audio file for voice '{voice_name}' does not exist on disk: {resolved_audio_path}"
         )
 
-    return str(resolved_audio_path)
+    return VoiceRecord(
+        path=str(resolved_audio_path),
+        ref_text=ref_text.strip(),
+        language=list(entry.get("language", [])),
+        description=entry.get("description"),
+    )
 
 
 def list_voices(language: Optional[str] = None) -> List[str]:
@@ -260,3 +319,15 @@ def get_voice_metadata(voice_name: str) -> Dict[str, Any]:
         raise VoiceNotFoundError(f"Voice '{voice_name}' not found in voice registry manifest.")
 
     return copy.deepcopy(manifest[voice_name])
+
+
+__all__ = [
+    "VoiceNotFoundError",
+    "VoiceRecord",
+    "resolve_manifest_path",
+    "load_manifest",
+    "clear_registry_cache",
+    "get_voice_ref",
+    "list_voices",
+    "get_voice_metadata",
+]

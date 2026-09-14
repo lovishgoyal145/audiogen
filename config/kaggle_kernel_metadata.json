@@ -1,0 +1,13 @@
+{
+  "id": "username/audiogen-batch-synthesis",
+  "title": "AudioGen Batch Synthesis",
+  "code_file": "batch/notebook_template.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_internet": "false",
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": []
+}
