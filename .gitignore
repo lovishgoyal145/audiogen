@@ -1,0 +1,26 @@
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Virtual environment
+.venv/
+venv/
+ENV/
+
+# Python cache & bytecode
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+*.so
+
+# Build & packaging
+build/
+dist/
+*.egg-info/
+
+# Testing cache
+.pytest_cache/
+.coverage
+htmlcov/
