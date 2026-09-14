@@ -1,4 +1,4 @@
-"""Tests for VoiceGen configuration engine, port allocation guardrails, and health probe."""
+"""Tests for AudioGen configuration engine, port allocation guardrails, and health probe."""
 
 import pytest
 from fastapi.testclient import TestClient
@@ -37,7 +37,7 @@ def test_default_port_assignment():
     settings = Settings()
     assert settings.port == 17000
     assert settings.host == "127.0.0.1"
-    assert settings.app_name == "VoiceGen"
+    assert settings.app_name == "AudioGen"
     assert settings.environment == "development"
     assert settings.worker_port == 17001
     assert settings.metrics_port == 17002
@@ -133,7 +133,7 @@ def test_health_probe_http_contract():
         assert response.status_code == 200
         payload = response.json()
         assert payload["status"] == "healthy"
-        assert payload["service"] == "VoiceGen"
+        assert payload["service"] == "AudioGen"
         assert payload["host"] == "127.0.0.1"
         assert payload["port"] == 17000
         assert payload["environment"] == "development"
@@ -150,7 +150,7 @@ def test_health_probe_dynamic_configuration(monkeypatch):
         assert response.status_code == 200
         payload = response.json()
         assert payload["status"] == "healthy"
-        assert payload["service"] == "VoiceGen"
+        assert payload["service"] == "AudioGen"
         assert payload["host"] == "0.0.0.0"
         assert payload["port"] == 17042
         assert payload["environment"] == "development"

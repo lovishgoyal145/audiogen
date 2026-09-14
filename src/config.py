@@ -1,4 +1,4 @@
-"""Configuration engine for VoiceGen service platform.
+"""Configuration engine for AudioGen service platform.
 
 Enforces port allocation strategy (17000-17099), environment precedence,
 and operational guardrails.
@@ -22,9 +22,9 @@ FORBIDDEN_PORTS: Set[int] = {3000, 5000, 8000, 8080, 8090}
 
 
 class Settings(BaseModel):
-    """VoiceGen operational settings model."""
+    """AudioGen operational settings model."""
 
-    app_name: str = "VoiceGen"
+    app_name: str = "AudioGen"
     environment: str = "development"
     host: str = "127.0.0.1"
     port: int = 17000
@@ -44,7 +44,7 @@ class Settings(BaseModel):
 
         # Application metadata
         if "app_name" not in data or data["app_name"] is None:
-            data["app_name"] = os.getenv("APP_NAME", "VoiceGen")
+            data["app_name"] = os.getenv("APP_NAME", "AudioGen")
         if "environment" not in data or data["environment"] is None:
             data["environment"] = os.getenv("ENVIRONMENT", "development")
 

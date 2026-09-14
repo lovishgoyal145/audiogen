@@ -1,7 +1,7 @@
 [project]
-name = "voicegen"
+name = "audiogen"
 version = "0.1.0"
-description = "VoiceGen: High-performance voice generation and operational service platform"
+description = "AudioGen: High-performance audio generation and operational service platform"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

@@ -1,4 +1,4 @@
-"""VoiceGen application entry point & health probe service."""
+"""AudioGen application entry point & health probe service."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from fastapi import Depends, FastAPI
 from src.config import Settings, get_settings
 
 # Configure structured logging to sys.stderr (Rule 4)
-logger = logging.getLogger("voicegen")
+logger = logging.getLogger("audiogen")
 if not logger.handlers:
     stderr_handler = logging.StreamHandler(sys.stderr)
     formatter = logging.Formatter(
@@ -65,9 +65,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="VoiceGen API",
+    title="AudioGen API",
     version="0.1.0",
-    description="High-performance voice generation and operational service platform",
+    description="High-performance audio generation and operational service platform",
     lifespan=lifespan,
 )
 
