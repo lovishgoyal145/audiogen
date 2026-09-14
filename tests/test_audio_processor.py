@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from core.audio_processor import (
+from audiogen.audio_processor import (
     ALLOWED_EXPORT_SAMPLE_RATES,
     HIGH_PASS_CUTOFF_HZ,
     TARGET_LUFS,

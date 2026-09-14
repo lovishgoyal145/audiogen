@@ -4,8 +4,8 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from src.config import FORBIDDEN_PORTS, Settings, get_settings
-from src.main import app
+from audiogen.config import FORBIDDEN_PORTS, Settings, get_settings
+from audiogen.main import app
 
 
 @pytest.fixture(autouse=True)

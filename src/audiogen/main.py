@@ -12,7 +12,7 @@ from typing import Any, Dict
 
 from fastapi import Depends, FastAPI
 
-from src.config import Settings, get_settings
+from audiogen.config import Settings, get_settings
 
 # Configure structured logging to sys.stderr (Rule 4)
 logger = logging.getLogger("audiogen")
@@ -88,5 +88,5 @@ if __name__ == "__main__":
     import uvicorn
 
     settings = get_settings()
-    uvicorn.run("src.main:app", host=settings.host, port=settings.port, reload=False)
+    uvicorn.run("audiogen.main:app", host=settings.host, port=settings.port, reload=False)
 

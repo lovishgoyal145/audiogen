@@ -1,7 +1,7 @@
 """Unit tests for Indic text normalization module (Hindi and Punjabi)."""
 
 import pytest
-from core.normalizer import (
+from audiogen.normalizer import (
     IndicNormalizer,
     expand_digits,
     normalize_text,

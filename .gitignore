@@ -1,26 +1,18 @@
-# Environment files
-.env
-.env.*
-!.env.example
-
-# Virtual environment
+# Python artifacts
 .venv/
-venv/
-ENV/
-
-# Python cache & bytecode
-*.pyc
-*.pyo
-*.pyd
 __pycache__/
-*.so
-
-# Build & packaging
-build/
+*.pyc
+.pytest_cache/
 dist/
+build/
 *.egg-info/
 
-# Testing cache
-.pytest_cache/
-.coverage
-htmlcov/
+# Environment & Scratch
+.env
+tmp/
+scratch/
+
+# Agent operational scratch (keep rules & template tracked)
+.agent/*
+!.agent/RULES.md
+!.agent/TICKET_TEMPLATE.md

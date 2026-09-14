@@ -9,7 +9,7 @@ import sys
 import traceback
 import numpy as np
 
-from core.normalizer import SUPPORTED_LANGUAGES, normalize_text
+from audiogen.normalizer import SUPPORTED_LANGUAGES, normalize_text
 
 DEFAULT_SAMPLE_RATE: Final[int] = 24000
 ENV_MODEL_PATH_KEY: Final[str] = "INDIC_TTS_MODEL_PATH"

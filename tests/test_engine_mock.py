@@ -6,7 +6,7 @@ import sys
 import numpy as np
 import pytest
 
-from core.engine import Synthesizer
+from audiogen.engine import Synthesizer
 
 
 class MockTTSBackend:

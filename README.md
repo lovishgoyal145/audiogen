@@ -15,5 +15,5 @@ AudioGen enforces strict operational guardrails adhering to `.agent/RULES.md`:
 .venv/bin/pytest tests/
 
 # Start server
-.venv/bin/python src/main.py
+.venv/bin/python src/audiogen/main.py
 ```
