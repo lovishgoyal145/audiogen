@@ -19,6 +19,7 @@ import soundfile as sf
 from starlette.testclient import TestClient
 
 from audiogen.engine import Synthesizer
+import voices.registry
 from server.app import (
     FALLBACK_SECRET_ENV_VAR,
     DEFAULT_BEARER_ENV_VAR,
@@ -46,12 +47,19 @@ class MockTTSBackend:
         self.max_concurrent = 0
         self.lock = threading.Lock()
 
-    def __call__(self, text: str, language: str, speaker_ref: Any = None) -> Tuple[np.ndarray, int]:
+    def __call__(
+        self,
+        text: str,
+        ref_audio_path: Optional[str] = None,
+        ref_text: str = "",
+        *args: Any,
+        **kwargs: Any,
+    ) -> Tuple[np.ndarray, int]:
         with self.lock:
             self.active_count += 1
             if self.active_count > self.max_concurrent:
                 self.max_concurrent = self.active_count
-            self.calls.append((text, language, speaker_ref))
+            self.calls.append((text, ref_audio_path, ref_text))
 
         time.sleep(0.06)  # Simulate non-instantaneous inference
 
@@ -237,7 +245,7 @@ def test_generate_validation_unknown_voice_returns_400(app_and_client: Tuple[Any
 
 
 def test_generate_validation_missing_ref_on_disk_returns_400(app_and_client: Tuple[Any, TestClient]) -> None:
-    """Verify voice in manifest but missing from disk returns 400 Bad Request."""
+    """Verify voice in manifest but missing from disk returns 500 Internal Server Error."""
     _, client = app_and_client
     headers = {"Authorization": "Bearer test-secret-token"}
 
@@ -250,8 +258,37 @@ def test_generate_validation_missing_ref_on_disk_returns_400(app_and_client: Tup
             json={"text": "नमस्ते", "language": "hi", "speaker_ref_name": "ghost_voice"},
             headers=headers,
         )
-        assert res.status_code == 400
+        assert res.status_code == 500
         assert "does not exist on disk" in res.json()["detail"]
+
+
+def test_generate_validation_missing_ref_on_disk_returns_500(app_and_client: Tuple[Any, TestClient]) -> None:
+    """Alias for test_generate_validation_missing_ref_on_disk_returns_400 with updated contract name."""
+    test_generate_validation_missing_ref_on_disk_returns_400(app_and_client)
+
+
+def test_generate_language_mismatch_with_voice_returns_400(app_and_client: Tuple[Any, TestClient]) -> None:
+    """Verify requesting language not supported by the resolved voice returns 400 Bad Request."""
+    _, client = app_and_client
+    headers = {"Authorization": "Bearer test-secret-token"}
+
+    # anchor_female_calm only supports Hindi ('hi'), requesting 'pa' must return 400
+    res = client.post(
+        "/generate",
+        json={"text": "ਸਤਿ ਸ੍ਰੀ ਅਕਾਲ", "language": "pa", "speaker_ref_name": "anchor_female_calm"},
+        headers=headers,
+    )
+    assert res.status_code == 400
+    assert "does not support language 'pa'" in res.json()["detail"]
+
+    # storyteller_punjabi_elder only supports Punjabi ('pa'), requesting 'hi' must return 400
+    res2 = client.post(
+        "/generate",
+        json={"text": "नमस्ते", "language": "hi", "speaker_ref_name": "storyteller_punjabi_elder"},
+        headers=headers,
+    )
+    assert res2.status_code == 400
+    assert "does not support language 'hi'" in res2.json()["detail"]
 
 
 # ==============================================================================
@@ -331,6 +368,48 @@ def test_generate_inference_failure_returns_500(app_and_client: Tuple[Any, TestC
         )
         assert res.status_code == 500
         assert "Inference failure: Synthesizer GPU out of memory" in res.json()["detail"]
+
+
+def test_generate_calls_synthesizer_with_indicf5_signature(app_and_client: Tuple[Any, TestClient]) -> None:
+    """Verify POST /generate calls Synthesizer.synthesize with IndicF5 signature (text, ref_audio_path, ref_text)."""
+    app, client = app_and_client
+    headers = {"Authorization": "Bearer test-secret-token"}
+
+    voice_name = "anchor_male_energetic"
+    voice_rec = voices.registry.get_voice_ref(voice_name)
+
+    synthesizer = app.state.synthesizer
+    with patch.object(synthesizer, "synthesize", wraps=synthesizer.synthesize) as synth_spy:
+        res = client.post(
+            "/generate",
+            json={"text": "नमस्ते भारत", "language": "hi", "speaker_ref_name": voice_name},
+            headers=headers,
+        )
+        assert res.status_code == 200
+        synth_spy.assert_called_once()
+        call_args, call_kwargs = synth_spy.call_args
+        assert call_args[0] == "नमस्ते भारत"
+        assert call_kwargs["ref_audio_path"] == voice_rec.path
+        assert call_kwargs["ref_text"] == voice_rec.ref_text
+
+
+def test_generate_synthesizer_raises_file_not_found_returns_500(app_and_client: Tuple[Any, TestClient]) -> None:
+    """Verify Synthesizer.synthesize raising FileNotFoundError returns 500 Internal Server Error."""
+    app, client = app_and_client
+    headers = {"Authorization": "Bearer test-secret-token"}
+
+    with patch.object(
+        app.state.synthesizer,
+        "synthesize",
+        side_effect=FileNotFoundError("Reference audio file not found on disk"),
+    ):
+        res = client.post(
+            "/generate",
+            json={"text": "नमस्ते", "language": "hi", "speaker_ref_name": "anchor_male_energetic"},
+            headers=headers,
+        )
+        assert res.status_code == 500
+        assert "Server configuration error: Reference audio file not found" in res.json()["detail"]
 
 
 # ==============================================================================

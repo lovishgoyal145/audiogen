@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+import functools
 import io
 import logging
 import os
@@ -237,16 +238,23 @@ def create_app(
 
         # 3. Resolve voice reference via voice registry
         try:
-            ref_audio_path = voices.registry.get_voice_ref(payload.speaker_ref_name)
+            voice_rec = voices.registry.get_voice_ref(payload.speaker_ref_name)
         except (voices.registry.VoiceNotFoundError, KeyError):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Unknown voice name: {payload.speaker_ref_name}",
             )
-        except FileNotFoundError:
+        except FileNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Server configuration error: Reference audio file for voice '{payload.speaker_ref_name}' does not exist on disk: {exc}",
+            )
+
+        supported_langs = [str(item).strip().lower() for item in voice_rec.language]
+        if lang not in supported_langs:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Reference audio file for voice '{payload.speaker_ref_name}' does not exist on disk",
+                detail=f"Voice '{payload.speaker_ref_name}' does not support language '{lang}'. Supported languages: {voice_rec.language}",
             )
 
         # 4. Perform serialized inference
@@ -263,10 +271,12 @@ def create_app(
                 loop = asyncio.get_running_loop()
                 result = await loop.run_in_executor(
                     None,
-                    inference_engine.synthesize,
-                    payload.text,
-                    lang,
-                    ref_audio_path,
+                    functools.partial(
+                        inference_engine.synthesize,
+                        payload.text,
+                        ref_audio_path=voice_rec.path,
+                        ref_text=voice_rec.ref_text,
+                    ),
                 )
                 if isinstance(result, tuple):
                     waveform, sample_rate = result
@@ -274,6 +284,11 @@ def create_app(
                     waveform, sample_rate = result, 24000
         except HTTPException:
             raise
+        except FileNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Server configuration error: Reference audio file not found: {exc}",
+            )
         except Exception as exc:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
