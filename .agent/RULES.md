@@ -1,7 +1,7 @@
 # Project Operational Rules & Guardrails
 
 1. Port Allocation Strategy:
-   - All backend, API, webhook, and websocket services MUST bind within the 17000–17099 port block (e.g., Core API: 17000, Webhooks/Workers: 17001, Metrics/Admin: 17002, Webhooks: 17003, WebSockets: 17004, Docs: 17005).
+   - All backend, API, webhook, and web UI services MUST bind within the 17000–17099 port block (e.g., Core API & Web UI: 17000, Workers: 17001, Metrics/Admin: 17002, Webhooks: 17003, WebSockets: 17004, Docs: 17005).
    - Standard ports (3000, 5000, 8000, 8080, 8090) are STRICTLY FORBIDDEN.
 
 2. Process & Execution Safety:
@@ -9,10 +9,25 @@
    - All commands must execute within the project virtual environment (`.venv/bin/...`).
 
 3. Scope Boundaries & Blast Radius Control:
-   - Strictly limit file changes to the "Allowed Files" defined in the active ticket (`batch/notebook_template.ipynb`, `tests/test_batch_runner.py`).
-   - `core/*` (`src/audiogen/engine.py`), `voices/*`, `server/*`, and `batch/manifest_schema.py` are STRICTLY OFF-LIMITS.
-   - Do not modify `batch/runner.py` unless it directly calls engine/registry interfaces (confirmed: it does not; it is out of scope).
-   - Existing unit tests must never be weakened, deleted, or muted. All existing test suites must pass 100%.
+   - Strictly limit file changes to the "Allowed Files" defined in the active ticket:
+     - `src/audiogen/config.py`
+     - `src/audiogen/engine.py`
+     - `src/audiogen/main.py`
+     - `.env.example`
+     - `tests/test_kaggle_e2e.py`
+     - `tests/test_ui_routes.py`
+     - `tests/test_engine_mock.py`
+     - `.agent/ticket.md`
+     - `.agent/PLAN.md`
+     - `.agent/RULES.md`
+   - STRICTLY OFF-LIMITS:
+     - Synthetic sine waves (440 Hz in `main.py`, acoustic formants in `engine.py`), mock audio buffers, or silent fallback generators.
+     - `src/audiogen/ui/` layout and styling (preserve Batman aesthetic and client bundle).
+     - `voices/registry.py` and `voices/registry_schema.json`.
+     - Ports outside the 17000–17099 range (default: 17000).
+     - Do NOT commit `.env` or any real API keys/credentials to Git.
+     - Do NOT run `git commit` or `git push`.
+   - Existing unit tests must never be weakened, deleted, or muted. All test cases must pass 100%.
 
 4. Secrets & Environment Isolation:
    - Never hardcode tokens, keys, passwords, or absolute environment-specific local machine paths.
@@ -27,4 +42,23 @@
 6. Testing Integrity & Verification:
    - No mock masking: Unit tests must assert genuine application logic and real failures rather than trivial mocks.
    - Call argument assertions: Synthesizer synthesis calls must be verified against actual IndicF5 signature arguments (`text`, `ref_audio_path`, `ref_text`).
-   - Verification command must be executed with `.venv/bin/pytest tests/test_batch_runner.py tests/test_batch_manifest.py -v` and achieve 100% pass rate before handoff.
+   - Backend integration tests in `tests/test_ui_routes.py` must verify `GET /` returns `200 OK` with valid HTML content.
+   - Full test suite verification command: `.venv/bin/pytest tests/` must execute with 100% pass rate before handoff.
+
+7. Layout & Aesthetic Guardrails:
+   - Left-aligned pinning: UI container strictly pinned to the left (`max-width: 520px; margin-left: 0; padding: 48px; min-height: 100vh`).
+   - Clear right viewport: The right half of the screen remains completely clear and uncluttered.
+   - Monochromatic Batman aesthetic:
+     - Near-black background (`#09090b` or `#0a0a0a`)
+     - Dark borders (`#27272a`)
+     - Crisp muted gray typography (`#a1a1aa`)
+     - Clean headings (`#f4f4f5`)
+     - High-contrast active accents (`#ffffff`)
+     - Sharp, understated borders on cards and buttons.
+
+8. Multi-Step Flow Guardrails:
+   - Step 1 (Select Language): "Select Language" header, 3 vertically stacked buttons with distinct gaps and margins (English, Hindi, Punjabi).
+   - Step 2 (Select Voice): "Select Voice" header, lists voices for selected language, prominent `+` button to create/upload a new voice profile, selecting a voice card progresses to Step 3.
+   - Step 3 (Script Input & Generation): Text area for target script, live character counter, "Generate Audio" button.
+   - Step 4 (Progress & Output): Minimal progress bar or pulsating indicator during synthesis. On completion: embedded `<audio controls>` player, direct download link, and "Reset / New Generation" action.
+   - Transitions must occur smoothly without full-page reloads.

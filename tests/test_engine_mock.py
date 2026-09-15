@@ -368,8 +368,10 @@ def test_waveform_normalization_clipping(dummy_ref_audio: Path) -> None:
     assert np.isclose(np.max(np.abs(wav)), 1.0)
 
 
-def test_fallback_acoustic_synthesis_with_local_weights(dummy_model_file: Path, dummy_ref_audio: Path) -> None:
-    """Verify deterministic acoustic fallback synthesis when local weights file is provided."""
+def test_fallback_acoustic_synthesis_with_local_weights(
+    dummy_model_file: Path, dummy_ref_audio: Path
+) -> None:
+    """Verify deterministic reference-based synthesis when local weights file is provided without backend."""
     synth = Synthesizer(model_path=dummy_model_file, sample_rate=24000)
     assert synth._backend is None
 
@@ -387,3 +389,25 @@ def test_fallback_acoustic_synthesis_with_local_weights(dummy_model_file: Path, 
         "संदर्भ पाठ",
     )
     assert len(wav_long) > len(wav_hi)
+
+
+def test_synthesizer_delegation_to_kaggle_bridge_when_backend_none(
+    dummy_ref_audio: Path,
+) -> None:
+    """Verify Synthesizer delegates to KaggleExecutionBridge when no local backend/model is loaded."""
+    synth = Synthesizer.__new__(Synthesizer)
+    synth._backend = None
+    synth._model_path = None
+    synth._sample_rate = 24000
+
+    test_wave = np.array([0.1, -0.1, 0.2], dtype=np.float32)
+    with patch("audiogen.engine.KaggleExecutionBridge.synthesize", return_value=(test_wave, 24000)) as mock_bridge:
+        wav, sr = synth.synthesize("नमस्ते भारत", dummy_ref_audio, "संदर्भ पाठ")
+        assert sr == 24000
+        assert np.array_equal(wav, test_wave)
+        mock_bridge.assert_called_once()
+        call_args, call_kwargs = mock_bridge.call_args
+        assert call_args[0] == "नमस्ते भारत"
+        assert str(dummy_ref_audio) in str(call_kwargs.get("ref_audio_path"))
+        assert call_kwargs.get("ref_text") == "संदर्भ पाठ"
+

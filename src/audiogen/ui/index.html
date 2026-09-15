@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AudioGen — Minimalist Speech Synthesis</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="viewport-wrapper">
+    <main class="app-container">
+      <!-- Brand Header -->
+      <header class="app-header">
+        <div class="logo">AUDIOGEN</div>
+        <div class="step-indicator" id="step-indicator">Step 1 of 4</div>
+      </header>
+
+      <!-- Step 1: Select Language -->
+      <section id="step-1" class="step-panel active">
+        <h1 class="step-title">Select Language</h1>
+        <p class="step-desc">Choose the target language for audio synthesis.</p>
+        <div class="language-stack">
+          <button class="btn-card lang-btn" data-lang="en">
+            <span class="lang-name">English</span>
+            <span class="lang-tag">EN</span>
+          </button>
+          <button class="btn-card lang-btn" data-lang="hi">
+            <span class="lang-name">Hindi</span>
+            <span class="lang-tag">HI</span>
+          </button>
+          <button class="btn-card lang-btn" data-lang="pa">
+            <span class="lang-name">Punjabi</span>
+            <span class="lang-tag">PA</span>
+          </button>
+        </div>
+      </section>
+
+      <!-- Step 2: Select Voice -->
+      <section id="step-2" class="step-panel hidden">
+        <div class="step-nav">
+          <button class="nav-back-btn" data-target="1">← Back</button>
+          <span class="context-badge" id="step2-lang-badge">Hindi</span>
+        </div>
+        <h1 class="step-title">Select Voice</h1>
+        <p class="step-desc">Choose a voice profile or create a custom profile.</p>
+        <div class="voice-grid" id="voice-grid">
+          <!-- Dynamic voice cards injected here -->
+        </div>
+        <button class="btn-add-voice" id="open-voice-modal-btn">
+          <span class="add-icon">+</span>
+          <span>Create / Upload Voice Profile</span>
+        </button>
+      </section>
+
+      <!-- Step 3: Script Input & Generation -->
+      <section id="step-3" class="step-panel hidden">
+        <div class="step-nav">
+          <button class="nav-back-btn" data-target="2">← Back</button>
+          <span class="context-badge" id="step3-voice-badge">Voice</span>
+        </div>
+        <h1 class="step-title">Script Input</h1>
+        <p class="step-desc">Enter the script to synthesize into speech.</p>
+        <div class="form-group">
+          <textarea id="script-input" rows="7" placeholder="Type or paste script here..."></textarea>
+          <div class="counter-row">
+            <span id="char-counter">0 characters</span>
+          </div>
+        </div>
+        <button id="btn-generate" class="btn btn-primary btn-block" disabled>Generate Audio</button>
+      </section>
+
+      <!-- Step 4: Progress & Output -->
+      <section id="step-4" class="step-panel hidden">
+        <div id="progress-state" class="state-block">
+          <h1 class="step-title">Synthesizing Audio</h1>
+          <p class="step-desc">Generating speech waveform...</p>
+          <div class="pulse-container">
+            <div class="pulse-bar"></div>
+          </div>
+        </div>
+
+        <div id="output-state" class="state-block hidden">
+          <h1 class="step-title">Audio Ready</h1>
+          <p class="step-desc" id="output-summary">Audio synthesized successfully.</p>
+          <div class="player-wrapper">
+            <audio id="audio-player" controls preload="auto"></audio>
+          </div>
+          <div class="output-actions">
+            <a id="btn-download" class="btn btn-secondary btn-block" download="audio_generated.wav">Download Audio (.wav)</a>
+            <button id="btn-reset" class="btn btn-primary btn-block">Reset / New Generation</button>
+          </div>
+        </div>
+
+        <div id="error-state" class="state-block hidden">
+          <h1 class="step-title error-title">Synthesis Failed</h1>
+          <p class="step-desc" id="error-message">An unexpected error occurred.</p>
+          <button id="btn-retry" class="btn btn-secondary btn-block">Back to Script</button>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Voice Creation Modal -->
+  <div id="voice-modal" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <h2 class="modal-title">New Voice Profile</h2>
+      <form id="voice-form">
+        <div class="form-group">
+          <label for="new-voice-id">Voice Identifier</label>
+          <input type="text" id="new-voice-id" required placeholder="e.g. narrator_male_calm">
+        </div>
+        <div class="form-group">
+          <label for="new-voice-lang">Language</label>
+          <select id="new-voice-lang" required>
+            <option value="en">English (en)</option>
+            <option value="hi">Hindi (hi)</option>
+            <option value="pa">Punjabi (pa)</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="new-voice-desc">Description</label>
+          <input type="text" id="new-voice-desc" placeholder="e.g. Calm narrator voice">
+        </div>
+        <div class="form-group">
+          <label for="new-voice-sample">Reference Audio Sample</label>
+          <select id="new-voice-sample" required>
+            <option value="voices/refs/anchor_female_calm.wav">anchor_female_calm.wav (Calm Female)</option>
+            <option value="voices/refs/anchor_male_energetic.wav">anchor_male_energetic.wav (Energetic Male)</option>
+            <option value="voices/refs/storyteller_punjabi_elder.wav">storyteller_punjabi_elder.wav (Elder Male)</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="new-voice-ref-text">Reference Transcript</label>
+          <textarea id="new-voice-ref-text" rows="3" required placeholder="Reference audio transcription..."></textarea>
+        </div>
+        <div class="modal-actions">
+          <button type="button" id="btn-close-modal" class="btn btn-secondary">Cancel</button>
+          <button type="submit" class="btn btn-primary">Save Profile</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

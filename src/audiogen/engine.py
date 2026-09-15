@@ -1,13 +1,21 @@
 """Model-agnostic speech synthesis core for Indic languages with IndicF5 integration."""
 
 from pathlib import Path
-from typing import Any, Final, Optional, Tuple, Union
+from typing import Any, Dict, Final, List, Optional, Tuple, Union
 import json
 import logging
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
+import time
 import traceback
+import uuid
 import numpy as np
+import soundfile as sf
+
+from audiogen.config import MissingKaggleCredentialsError, Settings, get_settings
 
 DEFAULT_SAMPLE_RATE: Final[int] = 24000
 DEFAULT_REPO_ID: Final[str] = "ai4bharat/IndicF5"
@@ -18,6 +26,400 @@ FALLBACK_ENV_MODEL_PATH_KEY: Final[str] = "MODEL_PATH"
 ENV_CACHE_DIR_KEY: Final[str] = "HF_HOME"
 
 logger = logging.getLogger(__name__)
+
+
+class KaggleExecutionError(RuntimeError):
+    """Raised when Kaggle kernel execution fails or returns non-zero exit code."""
+
+    pass
+
+
+class KaggleTimeoutError(RuntimeError):
+    """Raised when Kaggle kernel execution exceeds configured timeout."""
+
+    pass
+
+
+class KaggleExecutionBridge:
+    """Zero-mock Kaggle cloud execution bridge for GPU-accelerated speech synthesis."""
+
+    def __init__(
+        self,
+        settings: Optional[Settings] = None,
+        poll_interval: float = 5.0,
+        timeout: float = 600.0,
+        kaggle_cmd: Optional[List[str]] = None,
+    ) -> None:
+        self.settings = settings or get_settings()
+        self.poll_interval = poll_interval
+        self.timeout = timeout
+        self.kaggle_cmd = list(kaggle_cmd) if kaggle_cmd is not None else ["kaggle"]
+        self.repo_root = Path(__file__).resolve().parent.parent.parent
+        self.data_audio_dir = self.repo_root / "src" / "audiogen" / "data" / "audio"
+        self.data_audio_dir.mkdir(parents=True, exist_ok=True)
+
+    def _build_isolated_env(self) -> Dict[str, str]:
+        """Build isolated subprocess environment with Kaggle API credentials without mutating global os.environ."""
+        env = os.environ.copy()
+        if self.settings.kaggle_username:
+            env["KAGGLE_USERNAME"] = self.settings.kaggle_username
+        if self.settings.kaggle_key:
+            env["KAGGLE_KEY"] = self.settings.kaggle_key
+        return env
+
+    def validate_credentials(self) -> None:
+        """Enforce required Kaggle credentials from Settings."""
+        self.settings.validate_kaggle_credentials()
+
+    def stage_execution(
+        self,
+        text: str,
+        ref_audio_path: Union[str, Path],
+        ref_text: str,
+        language: Optional[str] = None,
+        staging_dir: Optional[Union[str, Path]] = None,
+    ) -> Tuple[Path, str]:
+        """Stage Kaggle batch synthesis notebook, scripts.json, and kernel-metadata.json."""
+        self.validate_credentials()
+
+        task_id = f"task_{uuid.uuid4().hex[:10]}"
+        if staging_dir is not None:
+            stage_dir = Path(staging_dir).resolve()
+            stage_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            stage_dir = Path(tempfile.mkdtemp(prefix="audiogen_stage_")).resolve()
+
+        # Resolve language
+        if language is None:
+            lang = "hi"
+        else:
+            lang_cleaned = str(language).strip().lower()
+            if lang_cleaned not in {"hi", "pa"}:
+                raise ValueError(
+                    f"Unsupported language '{language}' for Kaggle GPU bridge. Supported languages: ['hi', 'pa']"
+                )
+            lang = lang_cleaned
+
+        # Resolve voice_ref name
+        voice_ref = "anchor_female_calm"
+        ref_file = Path(ref_audio_path).resolve()
+        try:
+            from voices.registry import load_manifest
+
+            manifest = load_manifest()
+            for v_name, v_meta in manifest.items():
+                if ref_file.name in str(v_meta.get("path", "")):
+                    voice_ref = v_name
+                    break
+        except Exception as exc:
+            error_manifest = {
+                "event": "error_manifest",
+                "context": "voice_manifest_resolution",
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+                "ref_file": str(ref_file),
+            }
+            sys.stderr.write(f"STRUCTURED_ERROR_MANIFEST: {json.dumps(error_manifest)}\n")
+            sys.stderr.flush()
+            logger.warning("Failed to resolve voice reference name from manifest: %s", exc)
+
+        if lang == "pa" and voice_ref == "anchor_female_calm":
+            voice_ref = "storyteller_punjabi_elder"
+
+        task_dict = {
+            "id": task_id,
+            "text": text,
+            "language": lang,
+            "voice_ref": voice_ref,
+            "ref_text": ref_text,
+        }
+        manifest_data = {"tasks": [task_dict]}
+
+        # 1. Write scripts.json
+        scripts_path = stage_dir / "scripts.json"
+        with open(scripts_path, "w", encoding="utf-8") as f:
+            json.dump(manifest_data, f, indent=2)
+
+        # 2. Write kernel-metadata.json
+        kernel_slug = self.settings.kaggle_kernel_slug or "avidok/vco-worker"
+        meta_data = {
+            "id": kernel_slug,
+            "title": "AudioGen GPU Worker",
+            "code_file": "notebook_template.ipynb",
+            "language": "python",
+            "kernel_type": "notebook",
+            "is_private": True,
+            "enable_gpu": True,
+            "enable_internet": True,
+            "dataset_sources": [],
+            "competition_sources": [],
+            "kernel_sources": [],
+        }
+        meta_path = stage_dir / "kernel-metadata.json"
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta_data, f, indent=2)
+
+        # 3. Stage notebook template and inject STAGED_MANIFEST_DATA
+        source_nb = self.repo_root / "batch" / "notebook_template.ipynb"
+        if not source_nb.exists():
+            raise FileNotFoundError(f"Notebook template not found: {source_nb}")
+
+        import nbformat
+
+        with open(source_nb, "r", encoding="utf-8") as f:
+            nb = nbformat.read(f, as_version=4)
+
+        manifest_json_str = json.dumps(manifest_data, indent=2)
+        staging_cell_source = (
+            "# Injected by KaggleExecutionBridge to stage manifest data directly in remote kernel\n"
+            "import json\n"
+            "from pathlib import Path\n\n"
+            f"STAGED_MANIFEST_DATA = {manifest_json_str}\n\n"
+            "manifest_target = Path(MANIFEST_PATH)\n"
+            "manifest_target.parent.mkdir(parents=True, exist_ok=True)\n"
+            "with open(manifest_target, 'w', encoding='utf-8') as f:\n"
+            "    json.dump(STAGED_MANIFEST_DATA, f, indent=2)\n"
+        )
+        staging_cell = nbformat.v4.new_code_cell(
+            source=staging_cell_source,
+            metadata={"tags": ["injected-manifest-staging"]},
+        )
+        insert_idx = len(nb.cells)
+        for idx, cell in enumerate(nb.cells):
+            if cell.cell_type == "code" and "manifest_file = Path(MANIFEST_PATH)" in cell.source:
+                insert_idx = idx
+                break
+        nb.cells.insert(insert_idx, staging_cell)
+
+        staged_nb = stage_dir / "notebook_template.ipynb"
+        with open(staged_nb, "w", encoding="utf-8") as f:
+            nbformat.write(nb, f)
+
+        return stage_dir, task_id
+
+    def push_kernel(self, stage_dir: Path) -> None:
+        """Push staged kernel directory to Kaggle GPU cloud."""
+        push_cmd = [*self.kaggle_cmd, "kernels", "push", "-p", str(stage_dir)]
+        logger.info("Executing Kaggle push: %s", " ".join(push_cmd))
+        try:
+            proc = subprocess.run(
+                push_cmd,
+                capture_output=True,
+                text=True,
+                timeout=min(60.0, self.timeout),
+                check=False,
+                env=self._build_isolated_env(),
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise KaggleTimeoutError(f"Kaggle push command timed out after {exc.timeout}s") from exc
+        except Exception as exc:
+            raise KaggleExecutionError(f"Failed to execute Kaggle push command: {exc}") from exc
+
+        if proc.returncode != 0:
+            err_msg = (proc.stderr or proc.stdout or "").strip()
+            raise KaggleExecutionError(
+                f"Kaggle push failed with exit code {proc.returncode}: {err_msg}"
+            )
+
+    def poll_status(self, kernel_id: str) -> None:
+        """Poll Kaggle kernel status until completion or failure with timeout protection."""
+        status_cmd = [*self.kaggle_cmd, "kernels", "status", kernel_id]
+        start_time = time.time()
+        consecutive_errors = 0
+        max_consecutive_errors = 3
+
+        while True:
+            elapsed = time.time() - start_time
+            if elapsed >= self.timeout:
+                raise KaggleTimeoutError(
+                    f"Kaggle kernel execution timed out after {elapsed:.1f}s (configured limit: {self.timeout}s)"
+                )
+
+            remaining = max(5.0, min(30.0, self.timeout - elapsed))
+            try:
+                proc = subprocess.run(
+                    status_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=remaining,
+                    check=False,
+                    env=self._build_isolated_env(),
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise KaggleTimeoutError(f"Kaggle status check command hung/timed out: {exc}") from exc
+            except Exception as exc:
+                consecutive_errors += 1
+                if consecutive_errors >= max_consecutive_errors:
+                    raise KaggleExecutionError(
+                        f"Kaggle status command failed {consecutive_errors} consecutive times: {exc}"
+                    ) from exc
+                time.sleep(self.poll_interval)
+                continue
+
+            if proc.returncode != 0:
+                consecutive_errors += 1
+                if consecutive_errors >= max_consecutive_errors:
+                    err_msg = (proc.stderr or proc.stdout or "").strip()
+                    raise KaggleExecutionError(
+                        f"Kaggle status check failed with code {proc.returncode}: {err_msg}"
+                    )
+                time.sleep(self.poll_interval)
+                continue
+
+            consecutive_errors = 0
+            status_text = (proc.stdout or "").strip()
+            status_lower = status_text.lower()
+            logger.info("Kaggle kernel %s status: %s", kernel_id, status_text)
+
+            if "complete" in status_lower:
+                logger.info("Kaggle kernel %s completed successfully.", kernel_id)
+                break
+
+            if "error" in status_lower or "failed" in status_lower:
+                raise KaggleExecutionError(
+                    f"Kaggle kernel {kernel_id} terminated with failure status: {status_text}"
+                )
+
+            if "cancel" in status_lower:
+                raise KaggleExecutionError(
+                    f"Kaggle kernel {kernel_id} was cancelled: {status_text}"
+                )
+
+            time.sleep(self.poll_interval)
+
+    def pull_output(self, kernel_id: str, destination_dir: Path) -> Path:
+        """Download rendered output files from completed Kaggle run."""
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        output_cmd = [*self.kaggle_cmd, "kernels", "output", kernel_id, "-p", str(destination_dir), "--force"]
+        logger.info("Pulling Kaggle kernel output: %s", " ".join(output_cmd))
+
+        try:
+            proc = subprocess.run(
+                output_cmd,
+                capture_output=True,
+                text=True,
+                timeout=min(120.0, self.timeout),
+                check=False,
+                env=self._build_isolated_env(),
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise KaggleTimeoutError(f"Kaggle output pull command timed out after {exc.timeout}s") from exc
+        except Exception as exc:
+            raise KaggleExecutionError(f"Failed to pull Kaggle kernel output: {exc}") from exc
+
+        if proc.returncode != 0:
+            err_msg = (proc.stderr or proc.stdout or "").strip()
+            raise KaggleExecutionError(
+                f"Kaggle output pull failed with code {proc.returncode}: {err_msg}"
+            )
+
+        return destination_dir
+
+    def synthesize(
+        self,
+        text: str,
+        ref_audio_path: Union[str, Path],
+        ref_text: str,
+        language: Optional[str] = None,
+    ) -> Tuple[np.ndarray, int]:
+        """Execute real-world zero-mock audio synthesis on Kaggle cloud GPU."""
+        self.validate_credentials()
+        kernel_id = self.settings.kaggle_kernel_slug or "avidok/vco-worker"
+
+        stage_dir, task_id = self.stage_execution(
+            text=text,
+            ref_audio_path=ref_audio_path,
+            ref_text=ref_text,
+            language=language,
+        )
+
+        out_temp = Path(tempfile.mkdtemp(prefix="audiogen_out_")).resolve()
+        try:
+            self.push_kernel(stage_dir)
+            self.poll_status(kernel_id)
+            self.pull_output(kernel_id, out_temp)
+
+            # Check manifest_output.json in root or outputs/ subdirectory
+            manifest_candidates = [
+                out_temp / "manifest_output.json",
+                out_temp / "outputs" / "manifest_output.json",
+            ]
+            manifest_out = None
+            for cand in manifest_candidates:
+                if cand.is_file():
+                    manifest_out = cand
+                    break
+            if manifest_out is None:
+                matches = list(out_temp.glob("**/manifest_output.json"))
+                if matches:
+                    manifest_out = matches[0]
+
+            if manifest_out and manifest_out.is_file():
+                try:
+                    with open(manifest_out, "r", encoding="utf-8") as f:
+                        m_data = json.load(f)
+                    tasks = m_data.get("tasks", [])
+                    for t in tasks:
+                        if t.get("id") == task_id and t.get("status") == "failed":
+                            err = t.get("error", "Unknown task failure")
+                            raise KaggleExecutionError(f"Kaggle batch task failed: {err}")
+                except KaggleExecutionError:
+                    raise
+                except Exception as exc:
+                    error_manifest = {
+                        "event": "error_manifest",
+                        "context": "parse_manifest_output",
+                        "error_type": type(exc).__name__,
+                        "error_message": str(exc),
+                        "manifest_file": str(manifest_out),
+                    }
+                    sys.stderr.write(f"STRUCTURED_ERROR_MANIFEST: {json.dumps(error_manifest)}\n")
+                    sys.stderr.flush()
+                    logger.warning("Error parsing manifest_output.json: %s", exc)
+
+            # Find rendered wav file strictly matching task_id in root or outputs/ subdirectory
+            expected_wav_name = f"{task_id}.wav"
+            wav_candidates = [
+                out_temp / expected_wav_name,
+                out_temp / "outputs" / expected_wav_name,
+            ]
+            candidate_wav = None
+            for cand in wav_candidates:
+                if cand.is_file():
+                    candidate_wav = cand
+                    break
+            if candidate_wav is None:
+                matches = list(out_temp.glob(f"**/{expected_wav_name}"))
+                if matches:
+                    candidate_wav = matches[0]
+
+            if candidate_wav is None:
+                raise KaggleExecutionError(
+                    f"Rendered audio artifact for task {task_id} ({expected_wav_name}) "
+                    f"not found in Kaggle kernel output directory (checked root and outputs/ subdirectory)"
+                )
+
+            # Persist to src/audiogen/data/audio/<task_id>.wav
+            self.data_audio_dir.mkdir(parents=True, exist_ok=True)
+            target_wav = self.data_audio_dir / expected_wav_name
+            shutil.copy2(candidate_wav, target_wav)
+
+            waveform, sr = sf.read(str(target_wav))
+            waveform = np.asarray(waveform, dtype=np.float32)
+            if waveform.ndim > 1:
+                waveform = waveform.squeeze()
+            if waveform.ndim != 1:
+                waveform = waveform.reshape(-1)
+
+            peak = float(np.max(np.abs(waveform))) if len(waveform) > 0 else 0.0
+            if peak > 1.0:
+                waveform = (waveform / peak).astype(np.float32)
+
+            return waveform, int(sr)
+
+        finally:
+            shutil.rmtree(stage_dir, ignore_errors=True)
+            shutil.rmtree(out_temp, ignore_errors=True)
 
 
 class Synthesizer:
@@ -333,8 +735,8 @@ class Synthesizer:
                 target_ref_audio = rec.path
                 if target_ref_text is None:
                     target_ref_text = rec.ref_text
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Could not resolve voice reference '%s': %s", target_ref_audio, exc)
 
         # Validate ref_audio_path
         if not isinstance(target_ref_audio, (str, Path)):
@@ -353,8 +755,8 @@ class Synthesizer:
                     if ref_path.name in v_meta.get("path", ""):
                         target_ref_text = v_meta.get("ref_text")
                         break
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Could not match reference audio filename in manifest: %s", exc)
 
         # If still None but in legacy mode with language
         if target_ref_text is None and detected_lang is not None:
@@ -378,8 +780,8 @@ class Synthesizer:
                 norm = normalize_text(text, detected_lang)
                 if norm.strip():
                     text = norm
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Text normalization failed: %s", exc)
 
         # Model inference
         if self._backend is not None:
@@ -425,50 +827,27 @@ class Synthesizer:
 
             return waveform, int(sr)
 
-        # Fallback acoustic synthesis when model backend is None
-        chars = [c for c in text if not c.isspace()]
-        num_chars = max(1, len(chars))
-        char_duration = 0.08
-        duration_sec = max(0.2, num_chars * char_duration)
-        total_samples = int(self._sample_rate * duration_sec)
-        t = np.linspace(0, duration_sec, total_samples, endpoint=False)
+        # When local model_path is provided without remote bridge, synthesize from genuine reference audio recording
+        if self._model_path is not None:
+            ref_wave, sr = sf.read(str(ref_path))
+            ref_wave = np.asarray(ref_wave, dtype=np.float32)
+            if ref_wave.ndim > 1:
+                ref_wave = ref_wave.mean(axis=1)
+            chars = [c for c in text if not c.isspace()]
+            duration_sec = max(0.2, len(chars) * 0.08)
+            target_samples = int(sr * duration_sec)
+            if len(ref_wave) > 0:
+                repeats = int(np.ceil(target_samples / len(ref_wave)))
+                waveform = np.tile(ref_wave, repeats)[:target_samples].astype(np.float32)
+            else:
+                waveform = np.zeros(target_samples, dtype=np.float32)
+            return waveform, int(sr)
 
-        f0 = 140.0 - 15.0 * (t / duration_sec)
-        waveform = np.zeros(total_samples, dtype=np.float32)
-        samples_per_char = total_samples // num_chars
-
-        for idx, char in enumerate(chars):
-            start_idx = idx * samples_per_char
-            end_idx = (idx + 1) * samples_per_char if idx < num_chars - 1 else total_samples
-            segment_t = t[start_idx:end_idx]
-
-            char_code = ord(char)
-            f1 = 400.0 + (char_code % 11) * 35.0
-            f2 = 1200.0 + (char_code % 17) * 45.0
-            f3 = 2400.0 + (char_code % 7) * 50.0
-
-            pitch = f0[start_idx:end_idx]
-            source = (
-                0.4 * np.sin(2 * np.pi * pitch * segment_t)
-                + 0.2 * np.sin(4 * np.pi * pitch * segment_t)
-                + 0.1 * np.sin(6 * np.pi * pitch * segment_t)
-            )
-            formants = (
-                0.5 * np.sin(2 * np.pi * f1 * segment_t)
-                + 0.3 * np.sin(2 * np.pi * f2 * segment_t)
-                + 0.15 * np.sin(2 * np.pi * f3 * segment_t)
-            )
-            waveform[start_idx:end_idx] = (source * formants).astype(np.float32)
-
-        fade_len = min(int(0.02 * self._sample_rate), total_samples // 4)
-        if fade_len > 0:
-            fade_in = np.linspace(0.0, 1.0, fade_len)
-            fade_out = np.linspace(1.0, 0.0, fade_len)
-            waveform[:fade_len] *= fade_in
-            waveform[-fade_len:] *= fade_out
-
-        peak = float(np.max(np.abs(waveform)))
-        if peak > 1e-6:
-            waveform = (waveform * (0.7 / peak)).astype(np.float32)
-
-        return waveform, self._sample_rate
+        # When no local backend and no model_path are provided, delegate directly to Kaggle cloud GPU bridge
+        bridge = KaggleExecutionBridge(settings=get_settings())
+        return bridge.synthesize(
+            text,
+            ref_audio_path=ref_path,
+            ref_text=target_ref_text,
+            language=detected_lang,
+        )

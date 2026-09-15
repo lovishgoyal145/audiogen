@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import functools
 import os
-from typing import Any, Set
+from typing import Any, List, Optional, Set
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, ValidationInfo, field_validator, model_validator
@@ -19,6 +19,12 @@ load_dotenv()
 MIN_PORT: int = 17000
 MAX_PORT: int = 17099
 FORBIDDEN_PORTS: Set[int] = {3000, 5000, 8000, 8080, 8090}
+
+
+class MissingKaggleCredentialsError(ValueError):
+    """Raised when required Kaggle API credentials are not provided in environment."""
+
+    pass
 
 
 class Settings(BaseModel):
@@ -33,6 +39,9 @@ class Settings(BaseModel):
     webhook_port: int = 17003
     websocket_port: int = 17004
     docs_port: int = 17005
+    kaggle_username: Optional[str] = None
+    kaggle_key: Optional[str] = None
+    kaggle_kernel_slug: Optional[str] = "avidok/vco-worker"
 
     @model_validator(mode="before")
     @classmethod
@@ -90,7 +99,39 @@ class Settings(BaseModel):
                 val = os.getenv(env_var)
                 data[field_name] = val if (val is not None and val != "") else default_port
 
+        # Kaggle credentials and kernel configuration precedence
+        if "kaggle_username" not in data or data["kaggle_username"] is None:
+            data["kaggle_username"] = os.getenv("KAGGLE_USERNAME")
+        if "kaggle_key" not in data or data["kaggle_key"] is None:
+            data["kaggle_key"] = os.getenv("KAGGLE_KEY") or os.getenv("KAGGLE_API_KEY")
+        if "kaggle_kernel_slug" not in data or data["kaggle_kernel_slug"] is None:
+            val = os.getenv("KAGGLE_KERNEL_SLUG") or os.getenv("KAGGLE_KERNEL_ID")
+            data["kaggle_kernel_slug"] = val if (val is not None and val != "") else "avidok/vco-worker"
+
         return data
+
+    def get_missing_kaggle_credentials(self) -> List[str]:
+        """Return list of missing required Kaggle credential names."""
+        missing: List[str] = []
+        if not self.kaggle_username or not str(self.kaggle_username).strip():
+            missing.append("KAGGLE_USERNAME")
+        if not self.kaggle_key or not str(self.kaggle_key).strip():
+            missing.append("KAGGLE_KEY")
+        if not self.kaggle_kernel_slug or not str(self.kaggle_kernel_slug).strip():
+            missing.append("KAGGLE_KERNEL_SLUG")
+        return missing
+
+    def format_missing_credentials_message(self, missing: Optional[List[str]] = None) -> str:
+        """Format the canonical error message for missing Kaggle credentials."""
+        if missing is None:
+            missing = self.get_missing_kaggle_credentials()
+        return f"Missing required Kaggle API credentials in .env: {', '.join(missing)}"
+
+    def validate_kaggle_credentials(self) -> None:
+        """Validate required Kaggle credentials or raise MissingKaggleCredentialsError."""
+        missing = self.get_missing_kaggle_credentials()
+        if missing:
+            raise MissingKaggleCredentialsError(self.format_missing_credentials_message(missing))
 
     @field_validator(
         "port",
@@ -137,3 +178,11 @@ class Settings(BaseModel):
 def get_settings() -> Settings:
     """Singleton factory for cached Settings instance."""
     return Settings()
+
+
+def validate_kaggle_credentials(settings: Optional[Settings] = None) -> Settings:
+    """Validate that required Kaggle API credentials are present in Settings or raise MissingKaggleCredentialsError."""
+    if settings is None:
+        settings = get_settings()
+    settings.validate_kaggle_credentials()
+    return settings
