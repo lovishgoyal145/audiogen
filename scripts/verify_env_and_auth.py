@@ -115,6 +115,21 @@ def validate_env_vars(env_dict: Optional[Dict[str, str]] = None) -> Dict[str, st
     return resolved
 
 
+def resolve_probe_url(url: str) -> str:
+    """Resolve probe endpoint URL for pre-flight health check.
+
+    If URL points to Upstash or has no explicit command path,
+    probes /ping or /get/tunnel_url directly to avoid Upstash bare GET HTTP 400 EOF.
+    """
+    clean = url.strip().rstrip("/")
+    if clean.endswith("/ping") or clean.endswith("/get/tunnel_url"):
+        return clean
+    parsed = urlparse(clean)
+    if "upstash.io" in parsed.netloc.lower() or not parsed.path:
+        return f"{clean}/ping"
+    return clean
+
+
 def probe_tunnel_registry(
     url: str,
     auth_token: Optional[str] = None,
@@ -142,6 +157,8 @@ def probe_tunnel_registry(
     if auth_token and auth_token.strip():
         headers = {"Authorization": f"Bearer {auth_token.strip()}"}
 
+    target_probe_url = resolve_probe_url(url)
+
     def _exec_request(
         c: httpx.Client,
         method: str,
@@ -160,8 +177,8 @@ def probe_tunnel_registry(
 
     try:
         def _probe_with_client(c: httpx.Client) -> Tuple[int, str]:
-            # Step 1: Probe the configured URL directly
-            resp = _exec_request(c, "GET", url)
+            # Step 1: Probe the resolved probe URL directly
+            resp = _exec_request(c, "GET", target_probe_url)
 
             # If direct GET returned 200, success!
             if resp.status_code == 200:
@@ -171,29 +188,33 @@ def probe_tunnel_registry(
             if resp.status_code in (401, 403):
                 return resp.status_code, resp.text
 
-            # If endpoint is Upstash Redis REST or similar endpoint returning 400 (EOF / command needed)
-            # or 404/405, try /ping endpoint or HEAD request
-            if resp.status_code in (400, 404, 405):
-                clean_url = url.rstrip("/")
-                if not clean_url.endswith("/ping"):
-                    ping_url = f"{clean_url}/ping"
-                    try:
-                        ping_resp = _exec_request(c, "GET", ping_url)
-                        if ping_resp.status_code == 200:
-                            return 200, ping_resp.text
-                        if ping_resp.status_code in (401, 403):
-                            return ping_resp.status_code, ping_resp.text
-                    except Exception:
-                        pass
+            # If endpoint returns 400 (EOF / command needed) or 404/405,
+            # fallback to alternate command paths (/get/tunnel_url, /ping, HEAD)
+            clean_url = url.rstrip("/")
+            candidate_endpoints = []
+            if not target_probe_url.endswith("/get/tunnel_url"):
+                candidate_endpoints.append(f"{clean_url}/get/tunnel_url")
+            if not target_probe_url.endswith("/ping"):
+                candidate_endpoints.append(f"{clean_url}/ping")
 
+            for alt_url in candidate_endpoints:
                 try:
-                    head_resp = _exec_request(c, "HEAD", url)
-                    if head_resp.status_code == 200:
-                        return 200, ""
-                    if head_resp.status_code in (401, 403):
-                        return head_resp.status_code, ""
+                    alt_resp = _exec_request(c, "GET", alt_url)
+                    if alt_resp.status_code == 200:
+                        return 200, alt_resp.text
+                    if alt_resp.status_code in (401, 403):
+                        return alt_resp.status_code, alt_resp.text
                 except Exception:
                     pass
+
+            try:
+                head_resp = _exec_request(c, "HEAD", url)
+                if head_resp.status_code == 200:
+                    return 200, ""
+                if head_resp.status_code in (401, 403):
+                    return head_resp.status_code, ""
+            except Exception:
+                pass
 
             return resp.status_code, resp.text
 

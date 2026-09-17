@@ -8,6 +8,7 @@ Per project rules and TICKET-005:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from pathlib import Path
@@ -15,6 +16,7 @@ import re
 import shutil
 import subprocess
 from typing import Final, List, Optional, Union
+from urllib.parse import urlparse, urlunparse
 import httpx
 
 logger = logging.getLogger("audiogen.orchestrator.session_manager")
@@ -216,6 +218,93 @@ def parse_kaggle_status_output(output: str) -> str:
     return first_line.strip().strip('"').strip("'").upper() or "UNKNOWN"
 
 
+def resolve_read_endpoint(endpoint_url: str) -> str:
+    """Normalize registry read endpoint to explicit /get/tunnel_url path for Upstash Redis REST.
+
+    Supports:
+    - Base URL: https://<id>.upstash.io -> https://<id>.upstash.io/get/tunnel_url
+    - Write key path: https://<id>.upstash.io/set/tunnel_url -> https://<id>.upstash.io/get/tunnel_url
+    - Read key path: https://<id>.upstash.io/get/tunnel_url -> https://<id>.upstash.io/get/tunnel_url
+    - Generic URL with no path -> appends /get/tunnel_url
+    """
+    clean = endpoint_url.strip().rstrip("/")
+    parsed = urlparse(clean)
+    path = parsed.path.rstrip("/")
+    if path.endswith("/set/tunnel_url"):
+        new_path = path[:-len("/set/tunnel_url")] + "/get/tunnel_url"
+        return urlunparse(parsed._replace(path=new_path))
+    if path.endswith("/get/tunnel_url"):
+        return clean
+    if "upstash.io" in parsed.netloc.lower() or not path:
+        return f"{clean}/get/tunnel_url"
+    return clean
+
+
+def extract_tunnel_url_from_response(resp: httpx.Response) -> Optional[str]:
+    """Extract tunnel URL from Upstash {"result": ...}, raw JSON, or plain text.
+
+    Upstash Redis REST returns:
+    - {"result": "{\"tunnel_url\": \"https://...\", \"secret\": \"...\"}"} (JSON string in result)
+    - {"result": "https://..."} (URL string in result)
+    - {"result": {"tunnel_url": "https://..."}} (nested dict in result)
+    - {"result": null} (key not found)
+    Or direct webhooks returning:
+    - {"tunnel_url": "https://...", ...} or {"url": "https://..."}
+    - "https://..."
+    """
+    try:
+        data = resp.json()
+    except Exception:
+        text = resp.text.strip().strip('"').strip("'")
+        if text.startswith("http://") or text.startswith("https://"):
+            return text
+        return None
+
+    if isinstance(data, dict):
+        if "result" in data:
+            res = data["result"]
+            if res is None:
+                return None
+            if isinstance(res, dict):
+                raw_url = res.get("tunnel_url") or res.get("url")
+                if isinstance(raw_url, str) and (raw_url.startswith("http://") or raw_url.startswith("https://")):
+                    return raw_url.strip()
+            elif isinstance(res, str):
+                res_str = res.strip()
+                if res_str.startswith("{") and res_str.endswith("}"):
+                    try:
+                        parsed_res = json.loads(res_str)
+                        if isinstance(parsed_res, dict):
+                            raw_url = parsed_res.get("tunnel_url") or parsed_res.get("url")
+                            if isinstance(raw_url, str) and (raw_url.startswith("http://") or raw_url.startswith("https://")):
+                                return raw_url.strip()
+                    except Exception:
+                        pass
+                if res_str.startswith("http://") or res_str.startswith("https://"):
+                    return res_str
+            return None
+
+        raw_url = data.get("tunnel_url") or data.get("url")
+        if raw_url and isinstance(raw_url, str):
+            val = raw_url.strip()
+            if val.startswith("http://") or val.startswith("https://"):
+                return val
+        return None
+
+    elif isinstance(data, str):
+        val = data.strip()
+        if val.startswith("http://") or val.startswith("https://"):
+            return val
+        return None
+
+    raw_text = getattr(resp, "text", None)
+    if isinstance(raw_text, str):
+        text = raw_text.strip().strip('"').strip("'")
+        if text.startswith("http://") or text.startswith("https://"):
+            return text
+    return None
+
+
 def is_tunnel_healthy(
     registry_url: Optional[str] = None,
     health_timeout: float = 3.0,
@@ -240,7 +329,7 @@ def is_tunnel_healthy(
         logger.debug("No registry URL configured for tunnel health check.")
         return None
 
-    target = str(target).strip()
+    target = resolve_read_endpoint(str(target).strip())
 
     auth_token = os.environ.get(ENV_REGISTRY_AUTH_TOKEN)
     headers = {"Authorization": f"Bearer {auth_token.strip()}"} if auth_token and auth_token.strip() else None
@@ -264,18 +353,7 @@ def is_tunnel_healthy(
             logger.debug("Registry returned HTTP %d for %s", resp.status_code, target)
             return None
 
-        try:
-            data = resp.json()
-            if isinstance(data, dict):
-                raw_url = data.get("tunnel_url") or data.get("url")
-                if raw_url and isinstance(raw_url, str):
-                    tunnel_url = raw_url.strip()
-            elif isinstance(data, str) and (data.startswith("http://") or data.startswith("https://")):
-                tunnel_url = data.strip()
-        except Exception:
-            text = resp.text.strip()
-            if text.startswith("http://") or text.startswith("https://"):
-                tunnel_url = text
+        tunnel_url = extract_tunnel_url_from_response(resp)
     except Exception as exc:
         logger.debug("Failed to query registry at %s: %s", target, exc)
         return None
@@ -321,4 +399,6 @@ __all__ = [
     "get_kaggle_status",
     "parse_kaggle_status_output",
     "is_tunnel_healthy",
+    "resolve_read_endpoint",
+    "extract_tunnel_url_from_response",
 ]

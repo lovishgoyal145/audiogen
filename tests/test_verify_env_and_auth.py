@@ -161,24 +161,13 @@ def test_probe_tunnel_registry_without_auth_token_mock_assertion() -> None:
     assert "headers" not in call_args.kwargs or call_args.kwargs.get("headers") is None
 
 
-def test_probe_tunnel_registry_upstash_fallback_ping_success() -> None:
-    """Verify Upstash Redis REST fallback: 400 on root GET followed by 200 on /ping."""
+def test_probe_tunnel_registry_upstash_direct_ping_success() -> None:
+    """Verify Upstash Redis REST bare domain probes /ping directly on first attempt without 400 EOF."""
     mock_client = MagicMock(spec=httpx.Client)
-
-    def mock_get(target_url: str, **kwargs: Any) -> MagicMock:
-        resp = MagicMock(spec=httpx.Response)
-        if target_url == "https://large-pup-282364.upstash.io":
-            resp.status_code = 400
-            resp.text = '{"error": "EOF"}'
-        elif target_url == "https://large-pup-282364.upstash.io/ping":
-            resp.status_code = 200
-            resp.text = '{"result": "PONG"}'
-        else:
-            resp.status_code = 404
-            resp.text = "Not found"
-        return resp
-
-    mock_client.get.side_effect = mock_get
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 200
+    mock_resp.text = '{"result": "PONG"}'
+    mock_client.get.return_value = mock_resp
 
     success = probe_tunnel_registry(
         url="https://large-pup-282364.upstash.io",
@@ -186,10 +175,30 @@ def test_probe_tunnel_registry_upstash_fallback_ping_success() -> None:
         client=mock_client,
     )
     assert success is True
-    assert mock_client.get.call_count == 2
-    # Verify header forwarded on ping call as well
-    ping_call = mock_client.get.call_args_list[1]
-    assert ping_call.kwargs.get("headers") == {"Authorization": "Bearer test-token"}
+    assert mock_client.get.call_count == 1
+    call_args = mock_client.get.call_args
+    assert call_args[0][0] == "https://large-pup-282364.upstash.io/ping"
+    assert call_args.kwargs.get("headers") == {"Authorization": "Bearer test-token"}
+
+
+def test_probe_tunnel_registry_upstash_direct_get_tunnel_url_success() -> None:
+    """Verify Upstash Redis REST explicit /get/tunnel_url path probes directly."""
+    mock_client = MagicMock(spec=httpx.Client)
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 200
+    mock_resp.text = '{"result": "https://active.trycloudflare.com"}'
+    mock_client.get.return_value = mock_resp
+
+    success = probe_tunnel_registry(
+        url="https://large-pup-282364.upstash.io/get/tunnel_url",
+        auth_token="test-token-456",
+        client=mock_client,
+    )
+    assert success is True
+    assert mock_client.get.call_count == 1
+    call_args = mock_client.get.call_args
+    assert call_args[0][0] == "https://large-pup-282364.upstash.io/get/tunnel_url"
+    assert call_args.kwargs.get("headers") == {"Authorization": "Bearer test-token-456"}
 
 
 def test_probe_tunnel_registry_head_fallback_success() -> None:

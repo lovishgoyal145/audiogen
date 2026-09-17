@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import subprocess
 from unittest.mock import MagicMock, patch
@@ -104,6 +105,30 @@ def test_kernel_metadata_code_file_relative_and_resolvable() -> None:
     assert (DEFAULT_STAGE_DIR / code_file).is_file()
 
 
+def test_interactive_notebook_clones_public_repo_without_pat() -> None:
+    """Verify interactive_notebook.ipynb clones public repository without GITHUB_PAT or secret client."""
+    import json
+
+    notebook_path = DEFAULT_STAGE_DIR / "interactive_notebook.ipynb"
+    assert notebook_path.is_file()
+
+    with open(notebook_path, "r", encoding="utf-8") as f:
+        nb_data = json.load(f)
+
+    all_code = "\n".join("".join(cell.get("source", [])) for cell in nb_data.get("cells", []))
+
+    # GITHUB_PAT must not be referenced anywhere
+    assert "GITHUB_PAT" not in all_code
+
+    # Public repository git clone must be used
+    expected_clone = "git clone https://github.com/lovishgoyal145/audiogen.git /kaggle/working/audiogen"
+    assert expected_clone in all_code
+
+    # Cell 1 (bootstrap) must not use UserSecretsClient for cloning
+    cell_1_code = "".join(nb_data["cells"][1].get("source", []))
+    assert "UserSecretsClient" not in cell_1_code
+
+
 def test_kaggle_push_non_zero_exit_raises_error(tmp_path: Path) -> None:
     """Test _kaggle_push raises KagglePushError on non-zero exit code."""
     with patch("shutil.which", return_value="/usr/local/bin/kaggle"), \
@@ -204,8 +229,9 @@ def test_is_tunnel_healthy_registry_unreachable() -> None:
     client = MagicMock(spec=httpx.Client)
     client.get.side_effect = httpx.ConnectError("Connection refused")
 
-    result = is_tunnel_healthy(registry_url="https://registry.example.com/api", client=client)
+    result = is_tunnel_healthy(registry_url="https://registry.example.com/get/tunnel_url", client=client)
     assert result is None
+    assert client.get.call_args[0][0] == "https://registry.example.com/get/tunnel_url"
 
 
 def test_is_tunnel_healthy_registry_missing_tunnel_url() -> None:
@@ -216,8 +242,9 @@ def test_is_tunnel_healthy_registry_missing_tunnel_url() -> None:
     mock_resp.json.return_value = {"secret": "token123"}  # missing tunnel_url
     client.get.return_value = mock_resp
 
-    result = is_tunnel_healthy(registry_url="https://registry.example.com/api", client=client)
+    result = is_tunnel_healthy(registry_url="https://registry.example.com/get/tunnel_url", client=client)
     assert result is None
+    assert client.get.call_args[0][0] == "https://registry.example.com/get/tunnel_url"
 
 
 def test_is_tunnel_healthy_health_check_fails() -> None:
@@ -229,7 +256,7 @@ def test_is_tunnel_healthy_health_check_fails() -> None:
 
     def mock_get(url: str, **kwargs):
         resp = MagicMock(spec=httpx.Response)
-        if "registry" in url:
+        if "tunnel_url" in url:
             resp.status_code = 200
             resp.json.return_value = {"tunnel_url": "https://active-tunnel.trycloudflare.com"}
             return resp
@@ -240,7 +267,7 @@ def test_is_tunnel_healthy_health_check_fails() -> None:
 
     client.get.side_effect = mock_get
 
-    result = is_tunnel_healthy(registry_url="https://registry.example.com/api", client=client)
+    result = is_tunnel_healthy(registry_url="https://registry.example.com/get/tunnel_url", client=client)
     assert result is None
 
 
@@ -249,7 +276,7 @@ def test_is_tunnel_healthy_health_check_times_out() -> None:
     client = MagicMock(spec=httpx.Client)
 
     def mock_get(url: str, **kwargs):
-        if "registry" in url:
+        if "tunnel_url" in url:
             resp = MagicMock(spec=httpx.Response)
             resp.status_code = 200
             resp.json.return_value = {"tunnel_url": "https://active-tunnel.trycloudflare.com"}
@@ -260,7 +287,7 @@ def test_is_tunnel_healthy_health_check_times_out() -> None:
 
     client.get.side_effect = mock_get
 
-    result = is_tunnel_healthy(registry_url="https://registry.example.com/api", client=client)
+    result = is_tunnel_healthy(registry_url="https://registry.example.com/get/tunnel_url", client=client)
     assert result is None
 
 
@@ -270,7 +297,7 @@ def test_is_tunnel_healthy_success() -> None:
 
     def mock_get(url: str, **kwargs):
         resp = MagicMock(spec=httpx.Response)
-        if "registry" in url:
+        if "tunnel_url" in url:
             resp.status_code = 200
             resp.json.return_value = {"tunnel_url": "https://active-tunnel.trycloudflare.com"}
             return resp
@@ -282,18 +309,20 @@ def test_is_tunnel_healthy_success() -> None:
 
     client.get.side_effect = mock_get
 
-    result = is_tunnel_healthy(registry_url="https://registry.example.com/api", client=client)
+    result = is_tunnel_healthy(registry_url="https://registry.example.com/get/tunnel_url", client=client)
     assert result == "https://active-tunnel.trycloudflare.com"
+    assert client.get.call_args_list[0][0][0] == "https://registry.example.com/get/tunnel_url"
+    assert client.get.call_args_list[1][0][0] == "https://active-tunnel.trycloudflare.com/health"
 
 
 def test_is_tunnel_healthy_with_auth_token(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Test is_tunnel_healthy includes Authorization: Bearer <token> when TUNNEL_REGISTRY_AUTH_TOKEN is set."""
+    """Test is_tunnel_healthy asserts exact path and includes Authorization: Bearer <token>."""
     monkeypatch.setenv("TUNNEL_REGISTRY_AUTH_TOKEN", "token-session-123")
     client = MagicMock(spec=httpx.Client)
 
     def mock_get(url: str, **kwargs):
         resp = MagicMock(spec=httpx.Response)
-        if "registry" in url:
+        if "tunnel_url" in url:
             resp.status_code = 200
             resp.json.return_value = {"tunnel_url": "https://active-tunnel.trycloudflare.com"}
             return resp
@@ -305,16 +334,86 @@ def test_is_tunnel_healthy_with_auth_token(monkeypatch: pytest.MonkeyPatch) -> N
 
     client.get.side_effect = mock_get
 
-    result = is_tunnel_healthy(registry_url="https://registry.example.com/api", client=client)
+    result = is_tunnel_healthy(registry_url="https://registry.example.com/get/tunnel_url", client=client)
     assert result == "https://active-tunnel.trycloudflare.com"
 
     assert client.get.call_count == 2
-    # Step 1: registry call must contain the Authorization header
+    # Step 1: registry call must target exact /get/tunnel_url path and contain Authorization header
     reg_call = client.get.call_args_list[0]
+    assert reg_call[0][0] == "https://registry.example.com/get/tunnel_url"
     assert reg_call.kwargs.get("headers") == {"Authorization": "Bearer token-session-123"}
     # Step 2: tunnel health check must NOT contain the registry auth header
     health_call = client.get.call_args_list[1]
+    assert health_call[0][0] == "https://active-tunnel.trycloudflare.com/health"
     assert "headers" not in health_call.kwargs
+
+
+def test_is_tunnel_healthy_upstash_rest_json_string(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test is_tunnel_healthy parses Upstash Redis REST JSON result string: {"result": "{\"tunnel_url\": \"...\"}"}."""
+    monkeypatch.setenv("TUNNEL_REGISTRY_AUTH_TOKEN", "upstash-token")
+    client = MagicMock(spec=httpx.Client)
+
+    def mock_get(url: str, **kwargs):
+        resp = MagicMock(spec=httpx.Response)
+        if "tunnel_url" in url:
+            resp.status_code = 200
+            resp.json.return_value = {
+                "result": json.dumps({
+                    "tunnel_url": "https://active-upstash.trycloudflare.com",
+                    "secret": "secret123",
+                })
+            }
+            return resp
+        elif "health" in url:
+            resp.status_code = 200
+            resp.json.return_value = {"status": "online"}
+            return resp
+        raise ValueError(f"Unexpected URL: {url}")
+
+    client.get.side_effect = mock_get
+
+    # Provide bare Upstash domain -> should auto-resolve to /get/tunnel_url
+    result = is_tunnel_healthy(registry_url="https://large-pup-282364.upstash.io", client=client)
+    assert result == "https://active-upstash.trycloudflare.com"
+
+    reg_call = client.get.call_args_list[0]
+    assert reg_call[0][0] == "https://large-pup-282364.upstash.io/get/tunnel_url"
+    assert reg_call.kwargs.get("headers") == {"Authorization": "Bearer upstash-token"}
+
+
+def test_is_tunnel_healthy_upstash_rest_raw_url_string() -> None:
+    """Test is_tunnel_healthy parses Upstash Redis REST raw string result: {"result": "https://..."}."""
+    client = MagicMock(spec=httpx.Client)
+
+    def mock_get(url: str, **kwargs):
+        resp = MagicMock(spec=httpx.Response)
+        if "tunnel_url" in url:
+            resp.status_code = 200
+            resp.json.return_value = {"result": "https://raw-url.trycloudflare.com"}
+            return resp
+        elif "health" in url:
+            resp.status_code = 200
+            resp.json.return_value = {"status": "online"}
+            return resp
+        raise ValueError(f"Unexpected URL: {url}")
+
+    client.get.side_effect = mock_get
+
+    result = is_tunnel_healthy(registry_url="https://large-pup-282364.upstash.io/get/tunnel_url", client=client)
+    assert result == "https://raw-url.trycloudflare.com"
+
+
+def test_is_tunnel_healthy_upstash_rest_key_not_found() -> None:
+    """Test is_tunnel_healthy returns None when Upstash returns {"result": null}."""
+    client = MagicMock(spec=httpx.Client)
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {"result": None}
+    client.get.return_value = mock_resp
+
+    result = is_tunnel_healthy(registry_url="https://large-pup-282364.upstash.io", client=client)
+    assert result is None
+    assert client.get.call_args[0][0] == "https://large-pup-282364.upstash.io/get/tunnel_url"
 
 
 def test_is_tunnel_healthy_without_auth_token(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -324,7 +423,7 @@ def test_is_tunnel_healthy_without_auth_token(monkeypatch: pytest.MonkeyPatch) -
 
     def mock_get(url: str, **kwargs):
         resp = MagicMock(spec=httpx.Response)
-        if "registry" in url:
+        if "tunnel_url" in url:
             resp.status_code = 200
             resp.json.return_value = {"tunnel_url": "https://active-tunnel.trycloudflare.com"}
             return resp
@@ -336,10 +435,11 @@ def test_is_tunnel_healthy_without_auth_token(monkeypatch: pytest.MonkeyPatch) -
 
     client.get.side_effect = mock_get
 
-    result = is_tunnel_healthy(registry_url="https://registry.example.com/api", client=client)
+    result = is_tunnel_healthy(registry_url="https://registry.example.com/get/tunnel_url", client=client)
     assert result == "https://active-tunnel.trycloudflare.com"
 
     reg_call = client.get.call_args_list[0]
+    assert reg_call[0][0] == "https://registry.example.com/get/tunnel_url"
     assert "headers" not in reg_call.kwargs
 
 
@@ -350,7 +450,7 @@ def test_is_tunnel_healthy_with_empty_auth_token(monkeypatch: pytest.MonkeyPatch
 
     def mock_get(url: str, **kwargs):
         resp = MagicMock(spec=httpx.Response)
-        if "registry" in url:
+        if "tunnel_url" in url:
             resp.status_code = 200
             resp.json.return_value = {"tunnel_url": "https://active-tunnel.trycloudflare.com"}
             return resp
@@ -362,8 +462,9 @@ def test_is_tunnel_healthy_with_empty_auth_token(monkeypatch: pytest.MonkeyPatch
 
     client.get.side_effect = mock_get
 
-    result = is_tunnel_healthy(registry_url="https://registry.example.com/api", client=client)
+    result = is_tunnel_healthy(registry_url="https://registry.example.com/get/tunnel_url", client=client)
     assert result == "https://active-tunnel.trycloudflare.com"
 
     reg_call = client.get.call_args_list[0]
+    assert reg_call[0][0] == "https://registry.example.com/get/tunnel_url"
     assert "headers" not in reg_call.kwargs

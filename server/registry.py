@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import os
 from typing import Any, Dict, Final, Optional
+from urllib.parse import urlparse, urlunparse
 import httpx
 
 logger = logging.getLogger(__name__)
@@ -15,6 +16,28 @@ logger = logging.getLogger(__name__)
 ENV_REGISTRY_WEBHOOK_URL: Final[str] = "TUNNEL_REGISTRY_WEBHOOK_URL"
 ENV_REGISTRY_AUTH_TOKEN: Final[str] = "TUNNEL_REGISTRY_AUTH_TOKEN"
 DEFAULT_PUBLISH_TIMEOUT: Final[float] = 10.0
+
+
+def resolve_publish_endpoint(endpoint_url: str) -> str:
+    """Normalize registry publish endpoint to explicit /set/tunnel_url path for Upstash Redis REST.
+
+    Supports:
+    - Base URL: https://<id>.upstash.io -> https://<id>.upstash.io/set/tunnel_url
+    - Read key path: https://<id>.upstash.io/get/tunnel_url -> https://<id>.upstash.io/set/tunnel_url
+    - Write key path: https://<id>.upstash.io/set/tunnel_url -> https://<id>.upstash.io/set/tunnel_url
+    - Generic URL with no path -> appends /set/tunnel_url
+    """
+    clean = endpoint_url.strip().rstrip("/")
+    parsed = urlparse(clean)
+    path = parsed.path.rstrip("/")
+    if path.endswith("/get/tunnel_url"):
+        new_path = path[:-len("/get/tunnel_url")] + "/set/tunnel_url"
+        return urlunparse(parsed._replace(path=new_path))
+    if path.endswith("/set/tunnel_url"):
+        return clean
+    if "upstash.io" in parsed.netloc.lower() or not path:
+        return f"{clean}/set/tunnel_url"
+    return clean
 
 
 class URLPublisherError(RuntimeError):
@@ -74,6 +97,8 @@ class URLPublisher:
         if not target or not str(target).strip():
             raise URLPublisherError("No registry webhook URL configured.")
 
+        target = resolve_publish_endpoint(str(target))
+
         payload: Dict[str, Any] = {
             "tunnel_url": tunnel_url.strip(),
             "secret": secret.strip(),
@@ -116,3 +141,13 @@ def publish_tunnel_url(
     """Convenience functional wrapper around URLPublisher."""
     publisher = URLPublisher(endpoint_url=endpoint_url, timeout_seconds=timeout_seconds)
     return publisher.publish(tunnel_url=tunnel_url, secret=secret)
+
+
+__all__ = [
+    "ENV_REGISTRY_AUTH_TOKEN",
+    "ENV_REGISTRY_WEBHOOK_URL",
+    "URLPublisher",
+    "URLPublisherError",
+    "publish_tunnel_url",
+    "resolve_publish_endpoint",
+]

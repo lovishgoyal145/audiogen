@@ -550,20 +550,20 @@ def test_url_publisher_missing_endpoint_raises_error(monkeypatch: pytest.MonkeyP
 
 
 def test_url_publisher_success(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify URLPublisher sends POST and parses JSON response."""
+    """Verify URLPublisher sends POST to /set/tunnel_url and parses JSON response."""
     monkeypatch.delenv("TUNNEL_REGISTRY_AUTH_TOKEN", raising=False)
     mock_client = MagicMock(spec=httpx.Client)
     mock_resp = MagicMock()
     mock_resp.status_code = 200
-    mock_resp.json.return_value = {"status": "registered", "id": "123"}
+    mock_resp.json.return_value = {"result": "OK"}
     mock_client.post.return_value = mock_resp
 
-    pub = URLPublisher(endpoint_url="https://api.example.com/registry", client=mock_client)
+    pub = URLPublisher(endpoint_url="https://api.example.com/set/tunnel_url", client=mock_client)
     res = pub.publish("https://test.trycloudflare.com", "secret-token", metadata={"env": "test"})
 
-    assert res == {"status": "registered", "id": "123"}
+    assert res == {"result": "OK"}
     mock_client.post.assert_called_once_with(
-        "https://api.example.com/registry",
+        "https://api.example.com/set/tunnel_url",
         json={
             "tunnel_url": "https://test.trycloudflare.com",
             "secret": "secret-token",
@@ -574,23 +574,48 @@ def test_url_publisher_success(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_url_publisher_with_auth_token(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify URLPublisher sends Authorization: Bearer <token> when TUNNEL_REGISTRY_AUTH_TOKEN is set."""
+    """Verify URLPublisher sends exact path and Authorization: Bearer <token> when TUNNEL_REGISTRY_AUTH_TOKEN is set."""
     monkeypatch.setenv("TUNNEL_REGISTRY_AUTH_TOKEN", "mock-auth-token-12345")
     mock_client = MagicMock(spec=httpx.Client)
     mock_resp = MagicMock()
     mock_resp.status_code = 200
-    mock_resp.json.return_value = {"status": "ok"}
+    mock_resp.json.return_value = {"result": "OK"}
     mock_client.post.return_value = mock_resp
 
-    pub = URLPublisher(endpoint_url="https://api.example.com/registry", client=mock_client)
+    pub = URLPublisher(endpoint_url="https://api.example.com/set/tunnel_url", client=mock_client)
     res = pub.publish("https://test.trycloudflare.com", "secret-token", metadata={"env": "test"})
 
-    assert res == {"status": "ok"}
+    assert res == {"result": "OK"}
     mock_client.post.assert_called_once()
     call_args = mock_client.post.call_args
+    assert call_args[0][0] == "https://api.example.com/set/tunnel_url"
     assert call_args.kwargs.get("headers") == {"Authorization": "Bearer mock-auth-token-12345"}
     assert call_args.kwargs["json"]["secret"] == "secret-token"
     assert call_args.kwargs["json"]["tunnel_url"] == "https://test.trycloudflare.com"
+
+
+def test_url_publisher_upstash_domain_auto_appends_set_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify URLPublisher automatically normalizes bare Upstash domain or /get path to /set/tunnel_url."""
+    monkeypatch.setenv("TUNNEL_REGISTRY_AUTH_TOKEN", "upstash-secret")
+    mock_client = MagicMock(spec=httpx.Client)
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {"result": "OK"}
+    mock_client.post.return_value = mock_resp
+
+    # Test 1: Bare Upstash domain
+    pub_base = URLPublisher(endpoint_url="https://large-pup-282364.upstash.io", client=mock_client)
+    pub_base.publish("https://test.trycloudflare.com", "secret-token")
+    assert mock_client.post.call_args[0][0] == "https://large-pup-282364.upstash.io/set/tunnel_url"
+    assert mock_client.post.call_args.kwargs.get("headers") == {"Authorization": "Bearer upstash-secret"}
+
+    mock_client.reset_mock()
+
+    # Test 2: Upstash read path (/get/tunnel_url) normalized to write path (/set/tunnel_url)
+    pub_get = URLPublisher(endpoint_url="https://large-pup-282364.upstash.io/get/tunnel_url", client=mock_client)
+    pub_get.publish("https://test.trycloudflare.com", "secret-token")
+    assert mock_client.post.call_args[0][0] == "https://large-pup-282364.upstash.io/set/tunnel_url"
+    assert mock_client.post.call_args.kwargs.get("headers") == {"Authorization": "Bearer upstash-secret"}
 
 
 def test_url_publisher_with_empty_auth_token(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -602,10 +627,11 @@ def test_url_publisher_with_empty_auth_token(monkeypatch: pytest.MonkeyPatch) ->
     mock_resp.json.return_value = {"status": "ok"}
     mock_client.post.return_value = mock_resp
 
-    pub = URLPublisher(endpoint_url="https://api.example.com/registry", client=mock_client)
+    pub = URLPublisher(endpoint_url="https://api.example.com/set/tunnel_url", client=mock_client)
     pub.publish("https://test.trycloudflare.com", "secret-token")
 
     mock_client.post.assert_called_once()
+    assert mock_client.post.call_args[0][0] == "https://api.example.com/set/tunnel_url"
     assert "headers" not in mock_client.post.call_args.kwargs
 
 
@@ -618,10 +644,11 @@ def test_url_publisher_without_auth_token(monkeypatch: pytest.MonkeyPatch) -> No
     mock_resp.json.return_value = {"status": "ok"}
     mock_client.post.return_value = mock_resp
 
-    pub = URLPublisher(endpoint_url="https://api.example.com/registry", client=mock_client)
+    pub = URLPublisher(endpoint_url="https://api.example.com/set/tunnel_url", client=mock_client)
     pub.publish("https://test.trycloudflare.com", "secret-token")
 
     mock_client.post.assert_called_once()
+    assert mock_client.post.call_args[0][0] == "https://api.example.com/set/tunnel_url"
     assert "headers" not in mock_client.post.call_args.kwargs
 
 
@@ -633,7 +660,7 @@ def test_url_publisher_http_failure() -> None:
     mock_resp.raise_for_status.side_effect = httpx.HTTPStatusError("500 Server Error", request=MagicMock(), response=mock_resp)
     mock_client.post.return_value = mock_resp
 
-    pub = URLPublisher(endpoint_url="https://api.example.com/registry", client=mock_client)
+    pub = URLPublisher(endpoint_url="https://api.example.com/set/tunnel_url", client=mock_client)
     with pytest.raises(URLPublisherError, match="Failed to publish tunnel URL"):
         pub.publish("https://test.trycloudflare.com", "secret-token")
 
