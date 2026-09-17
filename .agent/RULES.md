@@ -30,6 +30,7 @@
 4. Secrets & Environment Isolation:
    - Never hardcode tokens, keys, passwords, or absolute environment-specific local machine paths.
    - Read configurations exclusively from environment variables via a `.env` file backed by a safe `.env.example`.
+   - Every remote HTTP call to external coordinators (KV stores, webhooks, or tunnel proxies) MUST conditionally forward Authorization headers if a corresponding _AUTH_TOKEN or _BEARER_TOKEN exists in the environment.
 
 5. Error Handling & Per-Item Failure Isolation:
    - No silent exception swallowing: all failures must be logged and reported.
@@ -40,6 +41,7 @@
 6. Testing Integrity & Verification:
    - No mock masking: Unit tests must assert genuine application logic and real failures rather than trivial mocks.
    - Call argument assertions: Synthesizer synthesis calls must be verified against actual IndicF5 signature arguments (`text`, `ref_audio_path`, `ref_text`).
+   - Mock assertions on the headers argument are mandatory in automated tests for any new or modified HTTP client invocation.
    - Backend integration tests in `tests/test_ui_routes.py` must verify `GET /` returns `200 OK` with valid HTML content.
    - Full test suite verification command: `.venv/bin/pytest tests/` must execute with 100% pass rate before handoff.
 
