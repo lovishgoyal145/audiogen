@@ -1,0 +1,17 @@
+orchestrator:
+  host: "127.0.0.1"
+  port: 17000
+  poll_interval_seconds: 5.0
+  startup_timeout_seconds: 600.0
+
+kaggle:
+  kernel_slug: "avidok/audiogen"
+  # Credentials KAGGLE_USERNAME and KAGGLE_KEY are read from environment variables
+
+registry:
+  webhook_url_env: "TUNNEL_REGISTRY_WEBHOOK_URL"
+  timeout_seconds: 5.0
+
+remote_server:
+  bearer_token_env: "SERVER_BEARER_TOKEN"
+  secret_header_name: "X-Server-Secret"

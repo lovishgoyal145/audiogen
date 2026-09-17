@@ -10,24 +10,22 @@
 
 3. Scope Boundaries & Blast Radius Control:
    - Strictly limit file changes to the "Allowed Files" defined in the active ticket:
-     - `src/audiogen/config.py`
-     - `src/audiogen/engine.py`
-     - `src/audiogen/main.py`
-     - `.env.example`
-     - `tests/test_kaggle_e2e.py`
-     - `tests/test_ui_routes.py`
-     - `tests/test_engine_mock.py`
+     - `server/registry.py`
+     - `orchestrator/session_manager.py`
+     - `orchestrator/gateway.py` (ONLY if independently making direct registry calls; verified out-of-scope)
+     - `tests/test_server_endpoints.py`
+     - `tests/test_session_manager.py`
      - `.agent/ticket.md`
      - `.agent/PLAN.md`
      - `.agent/RULES.md`
    - STRICTLY OFF-LIMITS:
-     - Synthetic sine waves (440 Hz in `main.py`, acoustic formants in `engine.py`), mock audio buffers, or silent fallback generators.
-     - `src/audiogen/ui/` layout and styling (preserve Batman aesthetic and client bundle).
-     - `voices/registry.py` and `voices/registry_schema.json`.
-     - Ports outside the 17000–17099 range (default: 17000).
+     - `core/*`, `voices/*`, `batch/*` — unrelated.
+     - `server/app.py`, `server/tunnel.py`, `server/watchdog.py`, `server/interactive_notebook.ipynb` — unrelated to this specific gap.
+     - The existing `secret` field in the JSON payload — do not rename, remove, or repurpose it.
+     - Do not weaken, delete, or mute any existing unit test. All test cases must pass 100%.
+     - Do not hardcode any token value — read only from the `TUNNEL_REGISTRY_AUTH_TOKEN` env var.
      - Do NOT commit `.env` or any real API keys/credentials to Git.
      - Do NOT run `git commit` or `git push`.
-   - Existing unit tests must never be weakened, deleted, or muted. All test cases must pass 100%.
 
 4. Secrets & Environment Isolation:
    - Never hardcode tokens, keys, passwords, or absolute environment-specific local machine paths.
@@ -62,3 +60,24 @@
    - Step 3 (Script Input & Generation): Text area for target script, live character counter, "Generate Audio" button.
    - Step 4 (Progress & Output): Minimal progress bar or pulsating indicator during synthesis. On completion: embedded `<audio controls>` player, direct download link, and "Reset / New Generation" action.
    - Transitions must occur smoothly without full-page reloads.
+
+## GPU Session Lifecycle Policy (standing decision — do not relitigate per-ticket)
+- GPU sessions are started MANUALLY, via one explicit UI action ("Start Session"),
+  never auto-detected or silently triggered by a `/generate` call.
+- Rationale: this repo runs on a 30hr/week free Kaggle GPU quota. Auto-detecting
+  and cold-starting behind every request produces unpredictable per-request
+  latency; a single manual trigger per work session produces one predictable
+  wait, then fast generation for the rest of that sitting.
+- Consequence: `/generate` must reject requests with HTTP 409 if no session is
+  currently `ready` — it must NEVER itself trigger a session start.
+- Shutdown remains automatic via the existing idle watchdog (TICKET-002) —
+  only the START side is manual. Do not add auto-shutdown-on-response-sent
+  logic; do not shorten the idle timeout as a side effect of any future ticket
+  without this being the ticket's stated purpose.
+- Kaggle CLI invocation must be wrapped in a single internal function
+  (e.g. `_kaggle_push()`) so the underlying command can change later
+  (`kaggle kernels push` → `kaggle kernels update`) without touching callers.
+- `kernels status` is informational only. The single source of truth for
+  "is the session actually ready to serve" is: tunnel URL present in the
+  existing registry/KV AND a real `GET /health` call against it succeeds.
+  Never treat a Kaggle `RUNNING` status alone as readiness.

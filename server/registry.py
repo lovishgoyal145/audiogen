@@ -13,6 +13,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 ENV_REGISTRY_WEBHOOK_URL: Final[str] = "TUNNEL_REGISTRY_WEBHOOK_URL"
+ENV_REGISTRY_AUTH_TOKEN: Final[str] = "TUNNEL_REGISTRY_AUTH_TOKEN"
 DEFAULT_PUBLISH_TIMEOUT: Final[float] = 10.0
 
 
@@ -80,12 +81,21 @@ class URLPublisher:
         if metadata:
             payload.update(metadata)
 
+        auth_token = os.environ.get(ENV_REGISTRY_AUTH_TOKEN)
+        headers = {"Authorization": f"Bearer {auth_token.strip()}"} if auth_token and auth_token.strip() else None
+
         try:
             if self._client is not None:
-                resp = self._client.post(target, json=payload, timeout=self.timeout_seconds)
+                if headers:
+                    resp = self._client.post(target, json=payload, timeout=self.timeout_seconds, headers=headers)
+                else:
+                    resp = self._client.post(target, json=payload, timeout=self.timeout_seconds)
             else:
                 with httpx.Client(timeout=self.timeout_seconds) as client:
-                    resp = client.post(target, json=payload)
+                    if headers:
+                        resp = client.post(target, json=payload, headers=headers)
+                    else:
+                        resp = client.post(target, json=payload)
 
             resp.raise_for_status()
             try:

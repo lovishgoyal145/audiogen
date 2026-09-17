@@ -549,8 +549,9 @@ def test_url_publisher_missing_endpoint_raises_error(monkeypatch: pytest.MonkeyP
         pub.publish("https://test.trycloudflare.com", "secret")
 
 
-def test_url_publisher_success() -> None:
+def test_url_publisher_success(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify URLPublisher sends POST and parses JSON response."""
+    monkeypatch.delenv("TUNNEL_REGISTRY_AUTH_TOKEN", raising=False)
     mock_client = MagicMock(spec=httpx.Client)
     mock_resp = MagicMock()
     mock_resp.status_code = 200
@@ -570,6 +571,58 @@ def test_url_publisher_success() -> None:
         },
         timeout=10.0,
     )
+
+
+def test_url_publisher_with_auth_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify URLPublisher sends Authorization: Bearer <token> when TUNNEL_REGISTRY_AUTH_TOKEN is set."""
+    monkeypatch.setenv("TUNNEL_REGISTRY_AUTH_TOKEN", "mock-auth-token-12345")
+    mock_client = MagicMock(spec=httpx.Client)
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {"status": "ok"}
+    mock_client.post.return_value = mock_resp
+
+    pub = URLPublisher(endpoint_url="https://api.example.com/registry", client=mock_client)
+    res = pub.publish("https://test.trycloudflare.com", "secret-token", metadata={"env": "test"})
+
+    assert res == {"status": "ok"}
+    mock_client.post.assert_called_once()
+    call_args = mock_client.post.call_args
+    assert call_args.kwargs.get("headers") == {"Authorization": "Bearer mock-auth-token-12345"}
+    assert call_args.kwargs["json"]["secret"] == "secret-token"
+    assert call_args.kwargs["json"]["tunnel_url"] == "https://test.trycloudflare.com"
+
+
+def test_url_publisher_with_empty_auth_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify URLPublisher sends no Authorization header when TUNNEL_REGISTRY_AUTH_TOKEN is whitespace/empty."""
+    monkeypatch.setenv("TUNNEL_REGISTRY_AUTH_TOKEN", "   ")
+    mock_client = MagicMock(spec=httpx.Client)
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {"status": "ok"}
+    mock_client.post.return_value = mock_resp
+
+    pub = URLPublisher(endpoint_url="https://api.example.com/registry", client=mock_client)
+    pub.publish("https://test.trycloudflare.com", "secret-token")
+
+    mock_client.post.assert_called_once()
+    assert "headers" not in mock_client.post.call_args.kwargs
+
+
+def test_url_publisher_without_auth_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify URLPublisher sends no Authorization header when TUNNEL_REGISTRY_AUTH_TOKEN is unset."""
+    monkeypatch.delenv("TUNNEL_REGISTRY_AUTH_TOKEN", raising=False)
+    mock_client = MagicMock(spec=httpx.Client)
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {"status": "ok"}
+    mock_client.post.return_value = mock_resp
+
+    pub = URLPublisher(endpoint_url="https://api.example.com/registry", client=mock_client)
+    pub.publish("https://test.trycloudflare.com", "secret-token")
+
+    mock_client.post.assert_called_once()
+    assert "headers" not in mock_client.post.call_args.kwargs
 
 
 def test_url_publisher_http_failure() -> None:

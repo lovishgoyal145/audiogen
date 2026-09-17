@@ -16,3 +16,11 @@ scratch/
 .agent/*
 !.agent/RULES.md
 !.agent/TICKET_TEMPLATE.md
+
+# Downloaded weights
+indicf5-weights/
+
+# Logs & Debug outputs
+*.log
+kaggle-debug-output/
+

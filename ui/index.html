@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AudioGen Session Control</title>
+  <style>
+    :root {
+      --bg: #09090b;
+      --card-bg: #121215;
+      --border: #27272a;
+      --text: #f4f4f5;
+      --muted: #a1a1aa;
+      --accent: #ffffff;
+      --danger: #ef4444;
+      --success: #22c55e;
+      --warning: #f59e0b;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      min-height: 100vh;
+      display: flex;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 520px;
+      margin-left: 0;
+      padding: 48px 32px;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      gap: 28px;
+    }
+
+    header h1 {
+      font-size: 1.5rem;
+      font-weight: 600;
+      letter-spacing: -0.025em;
+      color: var(--accent);
+      margin-bottom: 6px;
+    }
+
+    header p {
+      font-size: 0.875rem;
+      color: var(--muted);
+    }
+
+    .card {
+      background-color: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .card-title {
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: var(--text);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.75rem;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      padding: 4px 10px;
+      border-radius: 9999px;
+      border: 1px solid var(--border);
+      background-color: #18181b;
+      color: var(--muted);
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background-color: var(--muted);
+    }
+
+    .status-dot.idle { background-color: var(--muted); }
+    .status-dot.starting {
+      background-color: var(--warning);
+      animation: pulse 1.5s infinite;
+    }
+    .status-dot.ready { background-color: var(--success); }
+    .status-dot.error { background-color: var(--danger); }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(1.2); }
+    }
+
+    .status-message {
+      font-size: 0.85rem;
+      color: var(--muted);
+      line-height: 1.4;
+      word-break: break-word;
+    }
+
+    button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      font-size: 0.875rem;
+      font-weight: 500;
+      padding: 10px 16px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background-color: #18181b;
+      color: var(--text);
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+
+    button:hover:not(:disabled) {
+      background-color: #27272a;
+      border-color: #3f3f46;
+      color: var(--accent);
+    }
+
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    button.primary {
+      background-color: #27272a;
+      border-color: #3f3f46;
+      color: var(--accent);
+    }
+
+    button.primary:hover:not(:disabled) {
+      background-color: #3f3f46;
+    }
+
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    label {
+      font-size: 0.8rem;
+      font-weight: 500;
+      color: var(--muted);
+      display: flex;
+      justify-content: space-between;
+    }
+
+    select, textarea, input {
+      background-color: #18181b;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-size: 0.875rem;
+      padding: 10px 12px;
+      outline: none;
+      transition: border-color 0.15s ease;
+      width: 100%;
+      font-family: inherit;
+    }
+
+    select:focus, textarea:focus, input:focus {
+      border-color: #52525b;
+    }
+
+    textarea {
+      resize: vertical;
+      min-height: 90px;
+    }
+
+    .char-counter {
+      font-size: 0.75rem;
+      color: var(--muted);
+    }
+
+    .alert {
+      padding: 12px;
+      border-radius: 6px;
+      font-size: 0.85rem;
+      line-height: 1.4;
+      display: none;
+    }
+
+    .alert.error {
+      background-color: rgba(239, 68, 68, 0.1);
+      border: 1px solid rgba(239, 68, 68, 0.3);
+      color: #fca5a5;
+    }
+
+    .progress-bar-container {
+      width: 100%;
+      height: 4px;
+      background-color: var(--border);
+      border-radius: 2px;
+      overflow: hidden;
+      display: none;
+    }
+
+    .progress-bar-value {
+      width: 100%;
+      height: 100%;
+      background-color: var(--accent);
+      animation: indeterminate 1.2s infinite ease-in-out;
+      transform-origin: 0% 50%;
+    }
+
+    @keyframes indeterminate {
+      0% { transform: translateX(0) scaleX(0); }
+      40% { transform: translateX(0) scaleX(0.5); }
+      100% { transform: translateX(100%) scaleX(0.5); }
+    }
+
+    #output-container {
+      display: none;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    audio {
+      width: 100%;
+      height: 38px;
+      border-radius: 6px;
+      outline: none;
+    }
+
+    .download-link {
+      display: inline-block;
+      text-align: center;
+      font-size: 0.8rem;
+      color: var(--muted);
+      text-decoration: none;
+      padding: 6px 12px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      transition: all 0.15s ease;
+    }
+
+    .download-link:hover {
+      color: var(--accent);
+      border-color: #52525b;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>AudioGen Session Control</h1>
+      <p>Manual GPU session management and low-latency speech synthesis.</p>
+    </header>
+
+    <!-- Error Alert Banner -->
+    <div id="error-alert" class="alert error"></div>
+
+    <!-- GPU Session Control Card -->
+    <div class="card" id="session-card">
+      <div class="card-title">
+        <span>GPU Status</span>
+        <div class="status-badge">
+          <span class="status-dot idle" id="status-dot"></span>
+          <span id="status-label">Idle</span>
+        </div>
+      </div>
+      <div class="status-message" id="status-message">GPU session is idle. Click "Start Session" to wake the Kaggle worker.</div>
+      <button id="start-btn" class="primary">Start Session</button>
+    </div>
+
+    <!-- Synthesis Form (Revealed when READY) -->
+    <div class="card" id="synthesis-card" style="display: none;">
+      <div class="card-title">
+        <span>Speech Synthesis</span>
+      </div>
+
+      <div class="form-group">
+        <label for="language-select">Target Language</label>
+        <select id="language-select">
+          <option value="hi" selected>Hindi (hi)</option>
+          <option value="pa">Punjabi (pa)</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label for="voice-select">Voice Model</label>
+        <select id="voice-select">
+          <option value="">Loading voices...</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label for="script-input">
+          <span>Script Text</span>
+          <span class="char-counter" id="char-counter">0 chars</span>
+        </label>
+        <textarea id="script-input" placeholder="Enter text to synthesize..."></textarea>
+      </div>
+
+      <button id="generate-btn" class="primary">Generate Audio</button>
+
+      <!-- Synthesis Progress -->
+      <div class="progress-bar-container" id="generation-progress">
+        <div class="progress-bar-value"></div>
+      </div>
+
+      <!-- Output / Playback Container -->
+      <div id="output-container">
+        <audio id="audio-player" controls></audio>
+        <a id="download-link" class="download-link" href="#" download="audiogen_output.wav">Download Audio (WAV)</a>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // State machine variables
+    let currentState = "IDLE";
+    let pollIntervalId = null;
+
+    // Elements
+    const statusDot = document.getElementById("status-dot");
+    const statusLabel = document.getElementById("status-label");
+    const statusMessage = document.getElementById("status-message");
+    const startBtn = document.getElementById("start-btn");
+    const errorAlert = document.getElementById("error-alert");
+
+    const synthesisCard = document.getElementById("synthesis-card");
+    const languageSelect = document.getElementById("language-select");
+    const voiceSelect = document.getElementById("voice-select");
+    const scriptInput = document.getElementById("script-input");
+    const charCounter = document.getElementById("char-counter");
+    const generateBtn = document.getElementById("generate-btn");
+    const generationProgress = document.getElementById("generation-progress");
+    const outputContainer = document.getElementById("output-container");
+    const audioPlayer = document.getElementById("audio-player");
+    const downloadLink = document.getElementById("download-link");
+
+    function showError(message) {
+      if (!message) {
+        errorAlert.style.display = "none";
+        errorAlert.textContent = "";
+        return;
+      }
+      errorAlert.style.display = "block";
+      errorAlert.textContent = message;
+    }
+
+    function updateStateUI(state, message) {
+      currentState = state;
+
+      // Update dot and label
+      statusDot.className = "status-dot " + state.toLowerCase();
+      statusLabel.textContent = state;
+
+      if (state === "IDLE") {
+        statusMessage.textContent = message || "GPU session is idle. Click \"Start Session\" to wake the Kaggle worker.";
+        startBtn.disabled = false;
+        startBtn.textContent = "Start Session";
+        startBtn.style.display = "inline-flex";
+        synthesisCard.style.display = "none";
+      } else if (state === "STARTING") {
+        statusMessage.textContent = message || "Starting… (this can take a minute or two)";
+        startBtn.disabled = true;
+        startBtn.textContent = "Starting...";
+        startBtn.style.display = "inline-flex";
+        synthesisCard.style.display = "none";
+      } else if (state === "READY") {
+        statusMessage.textContent = message || "GPU session is ready.";
+        startBtn.disabled = true;
+        startBtn.style.display = "none";
+        synthesisCard.style.display = "flex";
+        stopPolling();
+        loadVoices(languageSelect.value);
+      } else if (state === "ERROR") {
+        statusMessage.textContent = message || "An error occurred during session startup.";
+        startBtn.disabled = false;
+        startBtn.textContent = "Retry Session";
+        startBtn.style.display = "inline-flex";
+        synthesisCard.style.display = "none";
+        stopPolling();
+      }
+    }
+
+    async function fetchSessionStatus() {
+      try {
+        const resp = await fetch("/session/status");
+        if (!resp.ok) return;
+        const data = await resp.json();
+        updateStateUI(data.status, data.message);
+      } catch (err) {
+        console.error("Error fetching session status:", err);
+      }
+    }
+
+    function startPolling() {
+      stopPolling();
+      pollIntervalId = setInterval(fetchSessionStatus, 3000);
+    }
+
+    function stopPolling() {
+      if (pollIntervalId !== null) {
+        clearInterval(pollIntervalId);
+        pollIntervalId = null;
+      }
+    }
+
+    async function handleStartSession() {
+      showError("");
+      if (currentState === "STARTING") return;
+
+      startBtn.disabled = true;
+      startBtn.textContent = "Starting...";
+      updateStateUI("STARTING", "GPU session startup initiated...");
+
+      try {
+        const resp = await fetch("/session/start", { method: "POST" });
+        const data = await resp.json();
+        if (resp.ok) {
+          updateStateUI(data.status, data.message);
+          startPolling();
+        } else {
+          showError(data.detail || data.message || "Failed to start session.");
+          updateStateUI("ERROR", data.message || "Start failed");
+        }
+      } catch (err) {
+        showError("Network error contacting gateway: " + err.message);
+        updateStateUI("ERROR", err.message);
+      }
+    }
+
+    async function loadVoices(language) {
+      voiceSelect.innerHTML = "<option value=''>Loading voices...</option>";
+      try {
+        const resp = await fetch(`/voices?language=${encodeURIComponent(language)}`);
+        if (!resp.ok) throw new Error("Failed to load voices");
+        const data = await resp.json();
+        const voices = data.voices || [];
+        voiceSelect.innerHTML = "";
+        if (voices.length === 0) {
+          voiceSelect.innerHTML = "<option value=''>No voices available</option>";
+          return;
+        }
+        voices.forEach(voice => {
+          const opt = document.createElement("option");
+          opt.value = voice;
+          opt.textContent = voice;
+          voiceSelect.appendChild(opt);
+        });
+      } catch (err) {
+        console.error("Error loading voices:", err);
+        voiceSelect.innerHTML = "<option value=''>Error loading voices</option>";
+      }
+    }
+
+    async function handleGenerate() {
+      showError("");
+      const text = scriptInput.value.trim();
+      const language = languageSelect.value;
+      const voice = voiceSelect.value;
+
+      if (!text) {
+        showError("Please enter script text before generating.");
+        return;
+      }
+      if (!voice) {
+        showError("Please select a voice model.");
+        return;
+      }
+
+      generateBtn.disabled = true;
+      generationProgress.style.display = "block";
+      outputContainer.style.display = "none";
+
+      try {
+        const resp = await fetch("/generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            text: text,
+            language: language,
+            speaker_ref_name: voice,
+            return_uri: false,
+          })
+        });
+
+        if (resp.status === 409) {
+          const errData = await resp.json();
+          showError("Cannot generate: " + (errData.error || "Session not ready"));
+          if (errData.status) updateStateUI(errData.status);
+          return;
+        }
+
+        if (!resp.ok) {
+          let errMsg = "Synthesis request failed with status " + resp.status;
+          try {
+            const errJson = await resp.json();
+            errMsg = errJson.detail || errJson.error || errMsg;
+          } catch (_) {
+            const errText = await resp.text();
+            if (errText) errMsg = errText;
+          }
+          showError(errMsg);
+          return;
+        }
+
+        const contentType = resp.headers.get("content-type") || "";
+        if (contentType.includes("audio")) {
+          const blob = await resp.blob();
+          const audioUrl = URL.createObjectURL(blob);
+          audioPlayer.src = audioUrl;
+          downloadLink.href = audioUrl;
+          downloadLink.download = `synth_${Date.now()}.wav`;
+          outputContainer.style.display = "flex";
+          audioPlayer.play().catch(() => {});
+        } else {
+          const jsonData = await resp.json();
+          if (jsonData.file_uri) {
+            audioPlayer.src = jsonData.file_uri;
+            downloadLink.href = jsonData.file_uri;
+            outputContainer.style.display = "flex";
+          }
+        }
+      } catch (err) {
+        showError("Generation request failed: " + err.message);
+      } finally {
+        generateBtn.disabled = false;
+        generationProgress.style.display = "none";
+      }
+    }
+
+    // Event Listeners
+    startBtn.addEventListener("click", handleStartSession);
+
+    languageSelect.addEventListener("change", () => {
+      loadVoices(languageSelect.value);
+    });
+
+    scriptInput.addEventListener("input", () => {
+      charCounter.textContent = `${scriptInput.value.length} chars`;
+    });
+
+    generateBtn.addEventListener("click", handleGenerate);
+
+    // Initial check on load
+    fetchSessionStatus();
+  </script>
+</body>
+</html>
