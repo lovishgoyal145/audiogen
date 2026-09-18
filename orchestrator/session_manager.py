@@ -39,6 +39,9 @@ TERMINAL_FAILURE_STATUSES: Final[frozenset[str]] = frozenset({
     "CANCEL_REQUESTED",
     "CANCEL_ACKNOWLEDGED",
     "COMPLETE",
+    "KERNELWORKERSTATUS.ERROR",
+    "KERNELWORKERSTATUS.FAILED",
+    "KERNELWORKERSTATUS.CANCELLED",
 })
 
 
@@ -108,6 +111,40 @@ def _kaggle_push(
     push_cmd = [*cmd_base, "kernels", "push", "-p", str(target_dir)]
     logger.info("Running Kaggle push command: %s", " ".join(push_cmd))
 
+    # Stage ephemeral runtime secrets for headless worker if credentials are present
+    secrets_file = target_dir / "runtime_secrets.json"
+    runtime_secrets: dict[str, str] = {}
+    webhook_url = os.environ.get("TUNNEL_REGISTRY_WEBHOOK_URL")
+    if webhook_url:
+        runtime_secrets["TUNNEL_REGISTRY_WEBHOOK_URL"] = webhook_url
+    bearer_token = os.environ.get("SERVER_BEARER_TOKEN") or os.environ.get("SHARED_SECRET")
+    if bearer_token:
+        runtime_secrets["SERVER_BEARER_TOKEN"] = bearer_token
+    auth_token = os.environ.get("TUNNEL_REGISTRY_AUTH_TOKEN")
+    if auth_token:
+        runtime_secrets["TUNNEL_REGISTRY_AUTH_TOKEN"] = auth_token
+
+    if runtime_secrets:
+        try:
+            payload = json.dumps(runtime_secrets, indent=2).encode("utf-8")
+            fd = os.open(
+                str(secrets_file),
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                0o600,
+            )
+            try:
+                with open(fd, "wb") as f:
+                    f.write(payload)
+            except Exception:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                raise
+            logger.info("Staged ephemeral runtime_secrets.json for Kaggle worker push.")
+        except OSError as exc:
+            logger.warning("Could not write ephemeral runtime_secrets.json: %s", exc)
+
     try:
         proc = subprocess.run(
             push_cmd,
@@ -123,12 +160,25 @@ def _kaggle_push(
     except Exception as exc:
         raise KagglePushError(f"Failed to execute Kaggle push: {exc}") from exc
     finally:
+        if secrets_file.exists():
+            try:
+                secrets_file.unlink()
+            except OSError as exc:
+                logger.warning(
+                    "Failed to unlink ephemeral runtime_secrets.json at %s: %s",
+                    secrets_file,
+                    exc,
+                )
         if created_temp_meta:
             try:
                 if meta_path.is_symlink() or meta_path.exists():
                     meta_path.unlink()
-            except OSError:
-                pass
+            except OSError as exc:
+                logger.warning(
+                    "Failed to unlink temporary kernel-metadata.json at %s: %s",
+                    meta_path,
+                    exc,
+                )
 
     if proc.returncode != 0:
         err_msg = (proc.stderr or proc.stdout or "").strip()
@@ -191,10 +241,13 @@ def get_kaggle_status(
 
 def parse_kaggle_status_output(output: str) -> str:
     """Extract and normalize status from Kaggle CLI stdout."""
-    # Pattern: '<kernel> has status "running"' or "<kernel> has status 'error'"
-    match = re.search(r'has\s+status\s+["\']?([a-zA-Z0-9_\-]+)["\']?', output, re.IGNORECASE)
+    # Pattern: '<kernel> has status "running"', "<kernel> has status 'error'",
+    # or '<kernel> has status "KernelWorkerStatus.ERROR"'
+    match = re.search(r'has\s+status\s+["\']?([a-zA-Z0-9_\.\-]+)["\']?', output, re.IGNORECASE)
     if match:
-        return match.group(1).strip().upper()
+        raw_status = match.group(1).strip().strip('"').strip("'").upper().strip(".")
+        normalized = raw_status.rsplit(".", 1)[-1].strip()
+        return normalized or "UNKNOWN"
 
     # Fallback to direct status keywords if stdout does not follow the standard phrasing
     output_upper = output.upper()
@@ -210,12 +263,16 @@ def parse_kaggle_status_output(output: str) -> str:
         "CANCEL",
     ]
     for status in known_statuses:
-        if re.search(rf"\b{re.escape(status)}\b", output_upper):
+        if re.search(rf"(?:\b|\.){re.escape(status)}\b", output_upper):
             return status
 
     # Fallback to cleaned output
     first_line = output.splitlines()[0] if output else ""
-    return first_line.strip().strip('"').strip("'").upper() or "UNKNOWN"
+    cleaned = first_line.strip().strip('"').strip("'").upper().strip(".")
+    if cleaned:
+        normalized = cleaned.rsplit(".", 1)[-1].strip()
+        return normalized or "UNKNOWN"
+    return "UNKNOWN"
 
 
 def resolve_read_endpoint(endpoint_url: str) -> str:

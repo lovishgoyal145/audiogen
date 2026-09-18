@@ -24,3 +24,8 @@ indicf5-weights/
 *.log
 kaggle-debug-output/
 
+# Ephemeral Kaggle runtime secrets
+runtime_secrets.json
+server/runtime_secrets.json
+**/runtime_secrets.json
+

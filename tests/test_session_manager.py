@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import stat
 import subprocess
+import sys
 from unittest.mock import MagicMock, patch
 import httpx
 import pytest
@@ -178,6 +181,20 @@ def test_kaggle_push_timeout_raises_error(tmp_path: Path) -> None:
         ('avidok/audiogen has status "cancelled"', "CANCELLED"),
         ("Kernel status is FAILED", "FAILED"),
         ("RUNNING", "RUNNING"),
+        ('avidok/audiogen has status "KernelWorkerStatus.ERROR"', "ERROR"),
+        ("avidok/audiogen has status 'KernelWorkerStatus.RUNNING'", "RUNNING"),
+        ('avidok/audiogen has status "KernelWorkerStatus.QUEUED"', "QUEUED"),
+        ('avidok/audiogen has status "KernelWorkerStatus.CANCELLED"', "CANCELLED"),
+        ('avidok/audiogen has status "KernelWorkerStatus.FAILED"', "FAILED"),
+        ('avidok/audiogen has status "KernelWorkerStatus.COMPLETE"', "COMPLETE"),
+        ("avidok/audiogen has status 'KernelWorkerStatus.ERROR'", "ERROR"),
+        ("avidok/audiogen has status 'KernelWorkerStatus.RUNNING'", "RUNNING"),
+        ("avidok/audiogen has status KernelWorkerStatus.ERROR", "ERROR"),
+        ("avidok/audiogen has status KernelWorkerStatus.RUNNING", "RUNNING"),
+        ('avidok/audiogen has status "KernelWorkerStatus.ERROR."', "ERROR"),
+        ("avidok/audiogen has status 'KernelWorkerStatus.RUNNING.'", "RUNNING"),
+        ("avidok/audiogen has status KernelWorkerStatus.QUEUED.", "QUEUED"),
+        ("KernelWorkerStatus.COMPLETE.", "COMPLETE"),
     ],
 )
 def test_parse_kaggle_status_output(cli_output: str, expected_status: str) -> None:
@@ -468,3 +485,167 @@ def test_is_tunnel_healthy_with_empty_auth_token(monkeypatch: pytest.MonkeyPatch
     reg_call = client.get.call_args_list[0]
     assert reg_call[0][0] == "https://registry.example.com/get/tunnel_url"
     assert "headers" not in reg_call.kwargs
+
+
+def test_kaggle_push_creates_and_cleans_up_ephemeral_secrets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify _kaggle_push writes ephemeral runtime_secrets.json with 0o600 perms during push and unlinks in finally."""
+    monkeypatch.setenv("TUNNEL_REGISTRY_WEBHOOK_URL", "https://registry.example.com/set/tunnel_url")
+    monkeypatch.setenv("SERVER_BEARER_TOKEN", "super-secret-token")
+    monkeypatch.setenv("TUNNEL_REGISTRY_AUTH_TOKEN", "auth-token-xyz")
+
+    stage_dir = tmp_path / "stage"
+    stage_dir.mkdir()
+
+    secrets_file = stage_dir / "runtime_secrets.json"
+    assert not secrets_file.exists()
+
+    def fake_subprocess_run(cmd, **kwargs):
+        # Invariant check: While push is executing, secrets_file must exist on disk with exact payload & 0o600
+        assert secrets_file.is_file()
+        file_mode = stat.S_IMODE(os.stat(secrets_file).st_mode)
+        assert file_mode == 0o600, f"Expected 0o600 permissions, got {oct(file_mode)}"
+        with open(secrets_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        assert data["TUNNEL_REGISTRY_WEBHOOK_URL"] == "https://registry.example.com/set/tunnel_url"
+        assert data["SERVER_BEARER_TOKEN"] == "super-secret-token"
+        assert data["TUNNEL_REGISTRY_AUTH_TOKEN"] == "auth-token-xyz"
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="Pushed", stderr="")
+
+    with patch("shutil.which", return_value="/usr/local/bin/kaggle"), \
+         patch("subprocess.run", side_effect=fake_subprocess_run):
+        _kaggle_push(stage_dir=stage_dir)
+
+    # Invariant check: In finally, secrets_file must be completely cleaned up
+    assert not secrets_file.exists()
+
+
+def test_kaggle_push_overwrites_existing_runtime_secrets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify _kaggle_push unconditionally overwrites existing runtime_secrets.json with fresh credentials."""
+    monkeypatch.setenv("TUNNEL_REGISTRY_WEBHOOK_URL", "https://fresh-registry.example.com")
+    monkeypatch.setenv("SERVER_BEARER_TOKEN", "fresh-token")
+
+    stage_dir = tmp_path / "stage_overwrite"
+    stage_dir.mkdir()
+    secrets_file = stage_dir / "runtime_secrets.json"
+    # Pre-seed with stale credentials
+    with open(secrets_file, "w", encoding="utf-8") as f:
+        json.dump({"TUNNEL_REGISTRY_WEBHOOK_URL": "stale", "SERVER_BEARER_TOKEN": "stale"}, f)
+
+    def fake_subprocess_run(cmd, **kwargs):
+        assert secrets_file.is_file()
+        with open(secrets_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        # Invariant: must be overwritten with fresh values
+        assert data["TUNNEL_REGISTRY_WEBHOOK_URL"] == "https://fresh-registry.example.com"
+        assert data["SERVER_BEARER_TOKEN"] == "fresh-token"
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="Pushed", stderr="")
+
+    with patch("shutil.which", return_value="/usr/local/bin/kaggle"), \
+         patch("subprocess.run", side_effect=fake_subprocess_run):
+        _kaggle_push(stage_dir=stage_dir)
+
+    assert not secrets_file.exists()
+
+
+def test_kaggle_push_cleans_up_ephemeral_secrets_on_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify _kaggle_push unlinks ephemeral runtime_secrets.json even when the push command fails."""
+    monkeypatch.setenv("TUNNEL_REGISTRY_WEBHOOK_URL", "https://registry.example.com")
+    monkeypatch.setenv("SERVER_BEARER_TOKEN", "token123")
+
+    stage_dir = tmp_path / "stage"
+    stage_dir.mkdir()
+    secrets_file = stage_dir / "runtime_secrets.json"
+
+    with patch("shutil.which", return_value="/usr/local/bin/kaggle"), \
+         patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="Fail")):
+        with pytest.raises(KagglePushError):
+            _kaggle_push(stage_dir=stage_dir)
+
+    assert not secrets_file.exists()
+
+
+def test_interactive_notebook_headless_safe(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Verify interactive notebook secrets cell executes safely when UserSecretsClient raises exception."""
+    notebook_path = DEFAULT_STAGE_DIR / "interactive_notebook.ipynb"
+    assert notebook_path.is_file()
+
+    with open(notebook_path, "r", encoding="utf-8") as f:
+        nb_data = json.load(f)
+
+    # Locate secrets cell (id: c3519be0)
+    secrets_cell = next(cell for cell in nb_data["cells"] if cell.get("id") == "c3519be0")
+    code = "".join(secrets_cell["source"])
+
+    # Simulate headless environment: UserSecretsClient raises ConnectionError / HTTPError
+    class MockFailingSecretsClient:
+        def __init__(self):
+            pass
+
+        def get_secret(self, key):
+            raise ConnectionError("HTTP Error 400: Bad Request")
+
+    # Staged runtime secrets file simulation
+    staged_secrets = {
+        "TUNNEL_REGISTRY_WEBHOOK_URL": "https://headless-test.example.com",
+        "SERVER_BEARER_TOKEN": "headless-secret-token",
+    }
+    secrets_file = tmp_path / "runtime_secrets.json"
+    with open(secrets_file, "w", encoding="utf-8") as f:
+        json.dump(staged_secrets, f)
+
+    orig_cwd = Path.cwd()
+    os.chdir(tmp_path)
+    try:
+        # Clear env to test loading from staged secrets
+        monkeypatch.delenv("TUNNEL_REGISTRY_WEBHOOK_URL", raising=False)
+        monkeypatch.delenv("SERVER_BEARER_TOKEN", raising=False)
+        fake_kaggle_secrets = MagicMock()
+        fake_kaggle_secrets.UserSecretsClient = MockFailingSecretsClient
+        monkeypatch.setitem(sys.modules, "kaggle_secrets", fake_kaggle_secrets)
+
+        exec_globals = {}
+        # Must execute without throwing any exception
+        exec(code, exec_globals)
+
+        assert os.environ.get("TUNNEL_REGISTRY_WEBHOOK_URL") == "https://headless-test.example.com"
+        assert os.environ.get("SERVER_BEARER_TOKEN") == "headless-secret-token"
+        # Invariant: candidate file must be unlinked to prevent leaking in Kaggle output datasets
+        assert not secrets_file.exists(), "Staged secrets file must be unlinked after loading"
+    finally:
+        os.chdir(orig_cwd)
+
+
+def test_interactive_notebook_has_no_hardcoded_secrets() -> None:
+    """Verify interactive notebook template contains ZERO hardcoded credentials or bearer tokens."""
+    notebook_path = DEFAULT_STAGE_DIR / "interactive_notebook.ipynb"
+    with open(notebook_path, "r", encoding="utf-8") as f:
+        nb_data = json.load(f)
+
+    all_code = "\n".join("".join(cell.get("source", [])) for cell in nb_data.get("cells", []))
+
+    forbidden_patterns = [
+        "https://large-pup",
+        ".upstash.io",
+        "trycloudflare.com",
+        "ghp_",
+        "token = \"",
+        "token = '",
+        "secret = \"",
+        "secret = '",
+        "api_key = \"",
+        "api_key = '",
+        "password = \"",
+    ]
+    for pattern in forbidden_patterns:
+        assert pattern not in all_code, f"Potential hardcoded secret pattern '{pattern}' found in notebook template."
+
+    # Verify that tokens and URLs are retrieved dynamically from os.environ
+    assert 'os.environ.get("SERVER_BEARER_TOKEN")' in all_code
+    assert 'os.environ.get("TUNNEL_REGISTRY_WEBHOOK_URL")' in all_code
+

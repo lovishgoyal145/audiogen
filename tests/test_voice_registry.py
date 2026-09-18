@@ -495,3 +495,54 @@ def test_cache_immutability_and_deep_isolation() -> None:
     fresh_meta = get_voice_metadata("anchor_male_energetic")
     assert "de" not in fresh_meta["language"]
 
+
+def test_registered_reference_audio_health() -> None:
+    """Verify all registered voice references have valid audio, duration >= 1.0s, and non-silent waveform."""
+    import numpy as np
+
+    manifest = load_manifest()
+    assert len(manifest) >= 3
+    assert "anchor_male_energetic" in manifest
+    assert "storyteller_punjabi_elder" in manifest
+    assert "anchor_female_calm" in manifest
+
+    for voice_name in manifest:
+        voice_rec = get_voice_ref(voice_name)
+        file_path = Path(voice_rec.path)
+        assert file_path.is_file(), f"Audio file for '{voice_name}' not found: {file_path}"
+
+        with wave.open(str(file_path), "rb") as wf:
+            channels = wf.getnchannels()
+            sampwidth = wf.getsampwidth()
+            framerate = wf.getframerate()
+            frames = wf.getnframes()
+            duration = frames / framerate
+
+            assert channels == 1, f"Voice '{voice_name}' must be mono, got {channels} channels"
+            assert sampwidth == 2, f"Voice '{voice_name}' must be 16-bit PCM, got sampwidth={sampwidth}"
+            assert framerate == 24000, f"Voice '{voice_name}' must be 24 kHz, got {framerate} Hz"
+            assert duration >= 1.0, f"Voice '{voice_name}' duration {duration:.2f}s < 1.0s"
+            assert duration >= 3.0, f"Voice '{voice_name}' duration {duration:.2f}s < 3.0s recommended minimum"
+
+            raw_bytes = wf.readframes(frames)
+            audio_samples = np.frombuffer(raw_bytes, dtype=np.int16)
+            max_amplitude = int(np.max(np.abs(audio_samples)))
+            assert max_amplitude > 100, f"Voice '{voice_name}' audio is silent (max_amp={max_amplitude})"
+
+
+def test_registered_reference_transcripts_authentic() -> None:
+    """Verify reference transcripts match genuine speech text in manifest for all voices."""
+    manifest = load_manifest()
+    anchor = manifest["anchor_male_energetic"]
+    assert "ਭਹੰਪੀ" in anchor["ref_text"]
+    assert len(anchor["ref_text"]) > 20
+
+    elder = manifest["storyteller_punjabi_elder"]
+    assert "ਬਜ਼ੁਰਗ" in elder["ref_text"]
+    assert len(elder["ref_text"]) > 20
+
+    female = manifest["anchor_female_calm"]
+    assert "नमस्ते" in female["ref_text"]
+    assert len(female["ref_text"]) > 20
+
+
