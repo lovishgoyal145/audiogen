@@ -44,6 +44,10 @@ REQUIRED_SECRET_KEYS: List[str] = [
     "SERVER_BEARER_TOKEN",
 ]
 
+OPTIONAL_SECRET_KEYS: List[str] = [
+    "HF_TOKEN",
+]
+
 REQUIRED_AUTH_KEYS: List[str] = [
     "KAGGLE_USERNAME",
     "KAGGLE_KEY",
@@ -76,6 +80,11 @@ def load_secrets_config(env_file_path: Optional[Path] = None) -> Dict[str, str]:
         if k in os.environ and os.environ[k].strip():
             env_values[k] = os.environ[k].strip()
 
+    # Optional keys fallback from system environment
+    for k in OPTIONAL_SECRET_KEYS:
+        if k in os.environ and os.environ[k].strip():
+            env_values[k] = os.environ[k].strip()
+
     # Target .env file is authoritative
     if target_env.is_file() and dotenv is not None:
         file_vals = dotenv.dotenv_values(target_env)
@@ -99,7 +108,11 @@ def load_secrets_config(env_file_path: Optional[Path] = None) -> Dict[str, str]:
 
 def compute_secrets_hash(config: Dict[str, str]) -> str:
     """Compute SHA-256 digest of secret values."""
-    payload = "|".join(config[k] for k in REQUIRED_SECRET_KEYS)
+    keys_to_hash = [k for k in REQUIRED_SECRET_KEYS if k in config]
+    for k in OPTIONAL_SECRET_KEYS:
+        if k in config:
+            keys_to_hash.append(k)
+    payload = "|".join(f"{k}:{config[k]}" for k in keys_to_hash)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -137,12 +150,16 @@ def stage_dataset_files(stage_dir: Path, dataset_slug: str, config: Dict[str, st
     meta_path = stage_dir / "dataset-metadata.json"
     _write_secure_file(meta_path, json.dumps(meta, indent=2))
 
-    secrets_dict = {k: config[k] for k in REQUIRED_SECRET_KEYS}
+    secrets_dict = {k: config[k] for k in REQUIRED_SECRET_KEYS if k in config}
+    for opt_k in OPTIONAL_SECRET_KEYS:
+        if opt_k in config:
+            secrets_dict[opt_k] = config[opt_k]
+
     secrets_json_path = stage_dir / "secrets.json"
     _write_secure_file(secrets_json_path, json.dumps(secrets_dict, indent=2))
 
-    for k in REQUIRED_SECRET_KEYS:
-        _write_secure_file(stage_dir / k, config[k])
+    for k, v in secrets_dict.items():
+        _write_secure_file(stage_dir / k, v)
 
 
 def sync_secrets_dataset(
