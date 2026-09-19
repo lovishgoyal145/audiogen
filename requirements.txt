@@ -3,5 +3,12 @@ soundfile>=0.12.1
 torch>=2.2.0
 transformers>=4.48.0,<4.50.0
 accelerate>=0.33.0
-git+https://github.com/ai4bharat/IndicF5.git
+cached_path
+pydub
+vocos
+torchdiffeq
+x_transformers>=1.31.14
+ema_pytorch>=0.5.2
+jieba
+librosa
 torchcodec>=0.1.0
