@@ -172,11 +172,26 @@ def create_app(
 
     if synthesizer is None:
         try:
+            logger.info("Initializing production Synthesizer()...")
             app.state.synthesizer = Synthesizer()
-        except Exception:
+            logger.info("Production Synthesizer() initialized successfully.")
+            app.state.synthesizer_init_error = None
+            app.state.synthesizer_init_traceback = None
+        except Exception as exc:
+            logger.error("Production Synthesizer() initialization failed: %s", exc, exc_info=True)
+            import traceback
+            tb_str = traceback.format_exc()
+            sys.stderr.write(f"\n[FATAL_SYNTHESIZER_INIT_EXCEPTION]\n{tb_str}\n")
+            sys.stderr.flush()
+            sys.stdout.write(f"\n[FATAL_SYNTHESIZER_INIT_EXCEPTION]\n{tb_str}\n")
+            sys.stdout.flush()
             app.state.synthesizer = None
+            app.state.synthesizer_init_error = f"{type(exc).__name__}: {exc}"
+            app.state.synthesizer_init_traceback = tb_str
     else:
         app.state.synthesizer = synthesizer
+        app.state.synthesizer_init_error = None
+        app.state.synthesizer_init_traceback = None
 
     app.state.watchdog = watchdog
     app.state.auth_token = auth_token
@@ -260,9 +275,13 @@ def create_app(
         # 4. Perform serialized inference
         inference_engine = getattr(app.state, "synthesizer", None)
         if inference_engine is None:
+            init_err = getattr(app.state, "synthesizer_init_error", None)
+            err_msg = "Inference failure: Synthesizer is not initialized."
+            if init_err:
+                err_msg += f" (Init error: {init_err})"
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Inference failure: Synthesizer is not initialized.",
+                detail=err_msg,
             )
 
         inference_lock: asyncio.Lock = app.state.inference_lock
