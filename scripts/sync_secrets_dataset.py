@@ -75,15 +75,11 @@ def load_secrets_config(env_file_path: Optional[Path] = None) -> Dict[str, str]:
     target_env = env_file_path or (REPO_ROOT / ".env")
     env_values: Dict[str, str] = {}
 
-    # System environment provides fallback
-    for k in REQUIRED_SECRET_KEYS + REQUIRED_AUTH_KEYS:
-        if k in os.environ and os.environ[k].strip():
-            env_values[k] = os.environ[k].strip()
-
-    # Optional keys fallback from system environment
-    for k in OPTIONAL_SECRET_KEYS:
-        if k in os.environ and os.environ[k].strip():
-            env_values[k] = os.environ[k].strip()
+    # System environment provides fallback only when explicit env file is not specified
+    if env_file_path is None:
+        for k in REQUIRED_SECRET_KEYS + REQUIRED_AUTH_KEYS + OPTIONAL_SECRET_KEYS:
+            if k in os.environ and os.environ[k].strip():
+                env_values[k] = os.environ[k].strip()
 
     # Target .env file is authoritative
     if target_env.is_file() and dotenv is not None:
@@ -112,7 +108,7 @@ def compute_secrets_hash(config: Dict[str, str]) -> str:
     for k in OPTIONAL_SECRET_KEYS:
         if k in config:
             keys_to_hash.append(k)
-    payload = "|".join(f"{k}:{config[k]}" for k in keys_to_hash)
+    payload = "|".join(config[k] for k in keys_to_hash)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 

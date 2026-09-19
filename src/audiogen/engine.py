@@ -549,13 +549,11 @@ class Synthesizer:
             try:
                 from transformers import AutoModel
 
-                hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
                 self._backend = AutoModel.from_pretrained(
                     self._repo_id,
                     revision=self._revision,
                     trust_remote_code=True,
                     cache_dir=str(self._cache_dir) if self._cache_dir else None,
-                    token=hf_token,
                 )
             except Exception as exc:
                 raise RuntimeError(
