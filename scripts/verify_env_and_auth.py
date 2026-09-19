@@ -17,7 +17,9 @@ import logging
 import os
 from pathlib import Path
 import re
+import shutil
 import socket
+import subprocess
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -291,11 +293,70 @@ def check_port_open(
                 ) from exc
 
 
+def validate_dataset_status(
+    username: Optional[str] = None,
+    kaggle_cmd: Optional[List[str]] = None,
+) -> bool:
+    """Verify that the private Kaggle secrets dataset exists and is accessible.
+
+    Args:
+        username: Kaggle username. If None, reads from KAGGLE_USERNAME environment variable.
+        kaggle_cmd: Optional Kaggle CLI command list.
+
+    Returns:
+        True if dataset exists and status is accessible.
+
+    Raises:
+        PreflightValidationError: If status check fails or dataset does not exist.
+    """
+    user = (username or os.environ.get("KAGGLE_USERNAME") or "").strip()
+    if not user:
+        raise PreflightValidationError("KAGGLE_USERNAME must be defined to check dataset status.")
+
+    slug = f"{user}/audiogen-secrets"
+    cmd_base = list(kaggle_cmd) if kaggle_cmd is not None else ["kaggle"]
+    executable = cmd_base[0]
+
+    if not shutil.which(executable) and not Path(executable).exists():
+        raise PreflightValidationError(f"Kaggle CLI executable '{executable}' was not found in PATH.")
+
+    sub_env = dict(os.environ)
+    sub_env["KAGGLE_USERNAME"] = user
+    k_key = os.environ.get("KAGGLE_KEY")
+    if k_key and k_key.strip():
+        sub_env["KAGGLE_KEY"] = k_key.strip()
+
+    status_cmd = [*cmd_base, "datasets", "status", slug]
+    logger.info("Checking Kaggle dataset status for '%s'...", slug)
+    try:
+        proc = subprocess.run(
+            status_cmd,
+            capture_output=True,
+            text=True,
+            timeout=30.0,
+            check=False,
+            env=sub_env,
+        )
+    except Exception as exc:
+        raise PreflightValidationError(f"Failed to execute Kaggle dataset status check for '{slug}': {exc}") from exc
+
+    if proc.returncode != 0:
+        err_msg = (proc.stderr or proc.stdout or "").strip()
+        raise PreflightValidationError(
+            f"Kaggle secrets dataset '{slug}' is missing or inaccessible (exit code {proc.returncode}): {err_msg}"
+        )
+
+    logger.info("Kaggle secrets dataset '%s' status check passed.", slug)
+    return True
+
+
 def run_preflight_checks(
     env_file_path: Optional[Path] = None,
     client: Optional[httpx.Client] = None,
     port: int = DEFAULT_CHECK_PORT,
     host: str = DEFAULT_CHECK_HOST,
+    check_dataset: bool = False,
+    kaggle_cmd: Optional[List[str]] = None,
 ) -> bool:
     """Run full pre-flight verification sequence.
 
@@ -325,14 +386,24 @@ def run_preflight_checks(
     logger.info("Checking local port %d availability...", port)
     check_port_open(port=port, host=host)
 
+    # 4. Optional Kaggle secrets dataset status check
+    if check_dataset:
+        logger.info("Validating Kaggle secrets dataset status...")
+        validate_dataset_status(
+            username=validated_vars.get("KAGGLE_USERNAME"),
+            kaggle_cmd=kaggle_cmd,
+        )
+
     logger.info("ALL PRE-FLIGHT CHECKS PASSED. Ready to launch server.")
     return True
 
 
-def main() -> int:
+def main(argv: Optional[List[str]] = None) -> int:
     """CLI entry point for scripts/verify_env_and_auth.py."""
+    args = sys.argv[1:] if argv is None else argv
+    check_dataset = "--check-dataset" in args or os.environ.get("CHECK_KAGGLE_DATASET") == "1"
     try:
-        run_preflight_checks()
+        run_preflight_checks(check_dataset=check_dataset)
         return 0
     except PreflightValidationError as exc:
         logger.error("PRE-FLIGHT CHECK FAILED: %s", exc)

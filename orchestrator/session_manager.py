@@ -19,6 +19,11 @@ from typing import Final, List, Optional, Union
 from urllib.parse import urlparse, urlunparse
 import httpx
 
+try:
+    from scripts.sync_secrets_dataset import sync_secrets_dataset
+except ImportError:
+    sync_secrets_dataset = None
+
 logger = logging.getLogger("audiogen.orchestrator.session_manager")
 
 REPO_ROOT: Final[Path] = Path(__file__).resolve().parent.parent
@@ -98,77 +103,55 @@ def _kaggle_push(
     # Ensure kernel-metadata.json is present in the target stage directory
     meta_path = target_dir / "kernel-metadata.json"
     created_temp_meta = False
-    if not meta_path.exists():
-        config_meta = REPO_ROOT / "config" / "kernel-metadata.json"
-        if config_meta.exists():
-            try:
-                meta_path.symlink_to(config_meta.resolve())
-                created_temp_meta = True
-            except OSError:
-                shutil.copy2(config_meta, meta_path)
-                created_temp_meta = True
-
-    push_cmd = [*cmd_base, "kernels", "push", "-p", str(target_dir)]
-    logger.info("Running Kaggle push command: %s", " ".join(push_cmd))
-
-    # Stage ephemeral runtime secrets for headless worker if credentials are present
-    secrets_file = target_dir / "runtime_secrets.json"
-    runtime_secrets: dict[str, str] = {}
-    webhook_url = os.environ.get("TUNNEL_REGISTRY_WEBHOOK_URL")
-    if webhook_url:
-        runtime_secrets["TUNNEL_REGISTRY_WEBHOOK_URL"] = webhook_url
-    bearer_token = os.environ.get("SERVER_BEARER_TOKEN") or os.environ.get("SHARED_SECRET")
-    if bearer_token:
-        runtime_secrets["SERVER_BEARER_TOKEN"] = bearer_token
-    auth_token = os.environ.get("TUNNEL_REGISTRY_AUTH_TOKEN")
-    if auth_token:
-        runtime_secrets["TUNNEL_REGISTRY_AUTH_TOKEN"] = auth_token
-
-    if runtime_secrets:
-        try:
-            payload = json.dumps(runtime_secrets, indent=2).encode("utf-8")
-            fd = os.open(
-                str(secrets_file),
-                os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
-                0o600,
-            )
-            try:
-                with open(fd, "wb") as f:
-                    f.write(payload)
-            except Exception:
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
-                raise
-            logger.info("Staged ephemeral runtime_secrets.json for Kaggle worker push.")
-        except OSError as exc:
-            logger.warning("Could not write ephemeral runtime_secrets.json: %s", exc)
 
     try:
-        proc = subprocess.run(
-            push_cmd,
-            capture_output=True,
-            text=True,
-            timeout=60.0,
-            check=False,
-        )
-    except FileNotFoundError as exc:
-        raise KagglePushError(f"Kaggle CLI not found: {exc}") from exc
-    except subprocess.TimeoutExpired as exc:
-        raise KagglePushError(f"Kaggle push timed out after {exc.timeout}s") from exc
-    except Exception as exc:
-        raise KagglePushError(f"Failed to execute Kaggle push: {exc}") from exc
+        if not meta_path.exists():
+            config_meta = REPO_ROOT / "config" / "kernel-metadata.json"
+            if config_meta.exists():
+                try:
+                    meta_path.symlink_to(config_meta.resolve())
+                    created_temp_meta = True
+                except OSError:
+                    shutil.copy2(config_meta, meta_path)
+                    created_temp_meta = True
+
+        # Check sync_secrets_dataset availability
+        if sync_secrets_dataset is None:
+            raise KagglePushError(
+                "Secret dataset synchronization utility (scripts.sync_secrets_dataset) is unavailable."
+            )
+
+        # Ensure private Kaggle secret dataset is synced before pushing kernel
+        try:
+            sync_secrets_dataset(kaggle_cmd=kaggle_cmd)
+        except Exception as exc:
+            logger.error("Failed to synchronize Kaggle secrets dataset: %s", exc)
+            raise KagglePushError(f"Secret dataset sync failed prior to push: {exc}") from exc
+
+        push_cmd = [*cmd_base, "kernels", "push", "-p", str(target_dir)]
+        logger.info("Running Kaggle push command: %s", " ".join(push_cmd))
+
+        try:
+            proc = subprocess.run(
+                push_cmd,
+                capture_output=True,
+                text=True,
+                timeout=60.0,
+                check=False,
+            )
+        except FileNotFoundError as exc:
+            raise KagglePushError(f"Kaggle CLI not found: {exc}") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise KagglePushError(f"Kaggle push timed out after {exc.timeout}s") from exc
+        except Exception as exc:
+            raise KagglePushError(f"Failed to execute Kaggle push: {exc}") from exc
+
+        if proc.returncode != 0:
+            err_msg = (proc.stderr or proc.stdout or "").strip()
+            raise KagglePushError(
+                f"Kaggle push failed with exit code {proc.returncode}: {err_msg}"
+            )
     finally:
-        if secrets_file.exists():
-            try:
-                secrets_file.unlink()
-            except OSError as exc:
-                logger.warning(
-                    "Failed to unlink ephemeral runtime_secrets.json at %s: %s",
-                    secrets_file,
-                    exc,
-                )
         if created_temp_meta:
             try:
                 if meta_path.is_symlink() or meta_path.exists():
@@ -179,12 +162,6 @@ def _kaggle_push(
                     meta_path,
                     exc,
                 )
-
-    if proc.returncode != 0:
-        err_msg = (proc.stderr or proc.stdout or "").strip()
-        raise KagglePushError(
-            f"Kaggle push failed with exit code {proc.returncode}: {err_msg}"
-        )
 
 
 def get_kaggle_status(
