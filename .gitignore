@@ -23,6 +23,7 @@ indicf5-weights/
 # Logs & Debug outputs
 *.log
 kaggle-debug-output/
+live-test-output/
 
 # Ephemeral Kaggle runtime secrets
 runtime_secrets.json
