@@ -8,23 +8,30 @@
    - NEVER issue `kill`, `pkill`, or `fuser -k` against any running PID without explicit user verification.
    - All commands must execute within the project virtual environment (`.venv/bin/...`).
 
-3. Scope Boundaries & Blast Radius Control (TICKET-009: Private Kaggle Secret Dataset & Fast-Fail Startup):
+3. Scope Boundaries & Blast Radius Control (TICKET-010: Native Zero-Shot Voice Cloning System with GPU Worker Integration, Language Expansion [English, Hindi, Punjabi], and Durable Persistence):
    - Strictly limit file changes to the "Allowed Files" defined in the active ticket:
-     - `config/kernel-metadata.json`
-     - `scripts/sync_secrets_dataset.py` (new sync utility)
-     - `scripts/verify_env_and_auth.py`
-     - `orchestrator/session_manager.py`
-     - `server/interactive_notebook.ipynb`
-     - `tests/test_session_manager.py`
-     - `tests/test_sync_secrets_dataset.py` (new test file)
-     - `.gitignore`
+     - `voices/registry.py`
+     - `voices/registry_schema.json`
+     - `voices/refs/*` (adding authentic reference audio samples)
+     - `server/app.py`
+     - `orchestrator/gateway.py`
+     - `ui/index.html`
+     - `src/audiogen/engine.py`
+     - `tests/test_voice_registry.py`
+     - `tests/test_server_endpoints.py`
+     - `tests/test_gateway.py`
+     - `tests/test_kaggle_e2e.py`
+     - `tests/test_voice_cloning.py` (new test file)
      - `.agent/ticket.md`
      - `.agent/PLAN.md`
      - `.agent/RULES.md`
    - STRICTLY OFF-LIMITS:
      - `core/*`, `batch/*` — unrelated.
-     - `server/app.py`, `server/tunnel.py`, `server/watchdog.py` — unrelated to secret propagation.
-     - `voices/*` — voice assets and schema are stable from TICKET-008.
+     - `scripts/sync_secrets_dataset.py`, `scripts/verify_env_and_auth.py` — stable from TICKET-009.
+     - `config/kernel-metadata.json` — stable from TICKET-009.
+     - `server/watchdog.py`, `server/tunnel.py`, `server/registry.py` — stable from TICKET-002/005.
+     - `src/audiogen/normalizer.py` — preserved for Indic normalizer test suite integrity.
+     - Port allocations: strictly 17000–17099.
      - Existing test assertions must never be weakened, skipped, or deleted. All unit tests must pass 100%.
      - Do NOT run `git commit` or `git push`.
 
@@ -65,20 +72,22 @@
    - Immediate fail-fast: By failing remote execution immediately upon missing secrets, Kaggle marks the kernel `ERROR`, allowing the gateway to report startup failure within seconds instead of hitting the 600-second timeout.
    - Pre-flight / Pre-push validation: The local orchestrator must verify that required secrets exist in `.env` and the secret dataset is synced before invoking `kaggle kernels push`.
 
-6. Voice Audio Reference Invariants:
-   - Every reference audio file in `voices/refs/` must be an authentic, valid audio recording (e.g. 24 kHz 16-bit mono WAV) with duration >= 1.0 second (recommended >= 3.0 seconds) and audible, non-zero speech amplitude (`max(abs(audio_samples)) > 0`).
+6. Voice Audio Reference & Cloning Invariants:
+   - Every reference audio file in `voices/refs/` must be an authentic, valid audio recording (e.g. 24 kHz 16-bit mono WAV) with duration >= 1.0 second (recommended >= 3.0 seconds, max 30.0 seconds) and audible, non-zero speech amplitude (`max(abs(audio_samples)) > 0`).
    - Dummy or placeholder files of 0.25-second silence (or pure zeroes) are strictly forbidden in voice registries.
    - Reference transcripts in `voices/registry_schema.json` must precisely correspond to the spoken words in the referenced audio file.
+   - **Language Canonization**: The canonical supported languages are strictly `en` (English), `hi` (Hindi), and `pa` (Punjabi). Any other language code must be rejected with HTTP 400.
+   - **Zero-Shot Condition Requirement**: F5-TTS / IndicF5 models require both reference audio AND reference transcript (`ref_text`) for conditioning. Voice cloning requests without `ref_text` must be rejected with HTTP 400.
+   - **Audio Validation & Normalization**: Uploaded audio files must be validated for format and duration, and converted/resampled to canonical 24 kHz 16-bit mono PCM WAV before persistence.
 
 7. Error Handling & Per-Item Failure Isolation:
    - No silent exception swallowing: all failures must be logged and reported.
    - Batch execution MUST preserve per-item failure isolation: a failure on task N must record `status: "failed"` with a clear error in `manifest_output.json` and continue to task N+1 without aborting the batch.
-   - Error messages for unresolvable voices (`VoiceNotFoundError`) and missing on-disk audio assets (`FileNotFoundError`) must be distinctly distinguishable in `manifest_output.json`.
+   - Error messages for unresolvable voices (`VoiceNotFoundError`) and missing on-disk audio assets (`FileNotFoundError`) must be distinctly distinguishable in API error responses.
    - Single model initialization: The synthesizer model weights MUST be loaded exactly once outside the task iteration loop, never reloaded per item.
 
 8. Testing Integrity & Verification:
    - No mock masking: Unit tests must assert genuine application logic and real failures rather than trivial mocks.
-   - Obsolete tests for `runtime_secrets.json` push staging must be removed and replaced with comprehensive tests for secret dataset synchronization, metadata verification, and `/kaggle/input` loading.
    - Audio validation: Voice registry tests must verify real audio properties (duration >= 1.0s, valid headers, non-silent waveform).
    - Mock assertions on the headers argument are mandatory in automated tests for any new or modified HTTP client invocation.
    - Full test suite verification command: `.venv/bin/pytest tests/` must execute with 100% pass rate before handoff.
@@ -94,17 +103,21 @@
      - High-contrast active accents (`#ffffff`)
      - Sharp, understated borders on cards and buttons.
 
-10. Multi-Step Flow Guardrails:
-    - Step 1 (Select Language): "Select Language" header, 3 vertically stacked buttons with distinct gaps and margins (English, Hindi, Punjabi).
-    - Step 2 (Select Voice): "Select Voice" header, lists voices for selected language, prominent `+` button to create/upload a new voice profile, selecting a voice card progresses to Step 3.
-    - Step 3 (Script Input & Generation): Text area for target script, live character counter, "Generate Audio" button.
-    - Step 4 (Progress & Output): Minimal progress bar or pulsating indicator during synthesis. On completion: embedded `<audio controls>` player, direct download link, and "Reset / New Generation" action.
-    - Transitions must occur smoothly without full-page reloads.
+10. Multi-Step & Language Accordion Flow Guardrails:
+    - Top-Level Language Categories: Three prominent language choices: **English** (`en`), **Hindi** (`hi`), and **Punjabi** (`pa`).
+    - Dynamic Voice Expansion: Selecting a language reveals the list of cloned voices available for that language.
+    - Voice Selection: Each voice item provides clear selection feedback and passes the selected voice into generation.
+    - Prominent Cloning Action: At the bottom of the revealed voice list, a dedicated `+ Clone New Voice` action is provided.
+    - Cloning Input Mechanism: Clicking `Clone New Voice` opens an understated modal or drawer allowing the user to provide an authentic audio file (`.wav`, `.mp3`, `.flac`), voice identifier, target language, and reference transcript.
+    - Seamless Immediate Availability: Upon successful cloning, the new voice is immediately added to the active voice list and selected for subsequent generation without page refresh.
 
-11. GPU Session Lifecycle Policy (standing decision — do not relitigate per-ticket):
-    - GPU sessions are started MANUALLY, via one explicit UI action ("Start Session"), never auto-detected or silently triggered by a `/generate` call.
-    - Rationale: this repo runs on a 30hr/week free Kaggle GPU quota. Auto-detecting and cold-starting behind every request produces unpredictable per-request latency; a single manual trigger per work session produces one predictable wait, then fast generation for the rest of that sitting.
-    - Consequence: `/generate` must reject requests with HTTP 409 if no session is currently `ready` — it must NEVER itself trigger a session start.
-    - Shutdown remains automatic via the existing idle watchdog (600s inactivity) — only the START side is manual. Do not add auto-shutdown-on-response-sent logic; do not shorten the idle timeout as a side effect of any future ticket without this being the ticket's stated purpose.
-    - Kaggle CLI invocation must be wrapped in a single internal function (`_kaggle_push()`) so the underlying command can change later without touching callers.
-    - `kernels status` is informational only. The single source of truth for "is the session actually ready to serve" is: tunnel URL present in the existing registry/KV AND a real `GET /health` call against it succeeds. Never treat a Kaggle `RUNNING` status alone as readiness.
+11. GPU Session Lifecycle & Real Worker Verification:
+    - GPU sessions are started MANUALLY, via one explicit UI action ("Start Session"), never auto-detected or silently triggered by a `/generate` or `/voices/clone` call.
+    - Consequence: Both `/generate` and `/voices/clone` MUST reject requests with HTTP 409 if no session is currently `ready` — they must NEVER themselves trigger a session start.
+    - Cloning is Real Work: Voice cloning is NOT a frontend-only mock. The remote worker must execute authentic audio validation, 24kHz mono resampling, and GPU model feature extraction/verification under `app.state.inference_lock`.
+    - Quota Protection: Idle watchdog timeout remains 600s of inactivity; requests touch the watchdog to keep the session alive while actively used.
+
+12. Voice Persistence & Worker Restart Resilience:
+    - Authoritative Durable Storage: Local disk (`voices/registry_schema.json` and `voices/refs/<id>.wav`) is the permanent source of truth for all cloned voices.
+    - Worker Restart Synchronization: Because Kaggle worker kernels are ephemeral and fresh instances boot with only default git assets, the gateway must automatically synchronize all custom local voices to the remote worker upon session readiness (`READY`) and provide on-demand sync fallback during `/generate`.
+    - Surviving Backend Restarts: On gateway startup, `voices.registry.load_manifest()` automatically discovers all previously cloned voices without requiring database migrations.

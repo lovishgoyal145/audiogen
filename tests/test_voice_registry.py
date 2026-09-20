@@ -13,6 +13,7 @@ import wave
 
 import pytest
 
+import voices.registry
 from voices.registry import (
     DEFAULT_MANIFEST_PATH,
     ENV_VOICE_REGISTRY_PATH,
@@ -25,6 +26,7 @@ from voices.registry import (
     get_voice_ref,
     list_voices,
     load_manifest,
+    register_voice,
     resolve_manifest_path,
 )
 
@@ -232,12 +234,93 @@ def test_load_manifest_empty_ref_text_raises_value_error(tmp_path: Path) -> None
 
 
 def test_load_manifest_unsupported_language_raises_value_error(tmp_path: Path) -> None:
-    """Verify loading manifest with language other than hi/pa raises ValueError."""
+    """Verify loading manifest with language other than en/hi/pa raises ValueError."""
     bad_manifest = tmp_path / "unsupported_lang.json"
     with open(bad_manifest, "w", encoding="utf-8") as f:
-        json.dump({"bad_voice": {"path": "refs/v1.wav", "ref_text": "Hello world", "language": ["en"]}}, f)
-    with pytest.raises(ValueError, match="Unsupported language 'en' in voice entry 'bad_voice'"):
+        json.dump({"bad_voice": {"path": "refs/v1.wav", "ref_text": "Hola mundo", "language": ["es"]}}, f)
+    with pytest.raises(ValueError, match="Unsupported language 'es' in voice entry 'bad_voice'"):
         load_manifest(bad_manifest)
+
+
+def test_load_manifest_accepts_english_language(tmp_path: Path) -> None:
+    """Verify loading manifest with English language 'en' succeeds."""
+    manifest_path = tmp_path / "en_manifest.json"
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump({"en_voice": {"path": "refs/v1.wav", "ref_text": "Hello world", "language": ["en"]}}, f)
+    loaded = load_manifest(manifest_path)
+    assert "en_voice" in loaded
+    assert loaded["en_voice"]["language"] == ["en"]
+
+
+def test_register_voice_atomic_disk_update(temp_voice_workspace: Path) -> None:
+    """Verify register_voice persists new voice atomically to disk and cache."""
+    manifest_path = temp_voice_workspace / "custom_manifest.json"
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump({}, f)
+
+    test_audio = temp_voice_workspace / "refs" / "v1.wav"
+    rec = voices.registry.register_voice(
+        voice_name="test_voice_1",
+        ref_audio_path=test_audio,
+        ref_text="This is a test transcript for voice 1.",
+        languages=["en"],
+        description="Custom test voice",
+        manifest_path=manifest_path,
+    )
+    assert isinstance(rec, voices.registry.VoiceRecord)
+    assert rec.ref_text == "This is a test transcript for voice 1."
+    assert rec.language == ["en"]
+
+    # Verify persisted on disk
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    assert "test_voice_1" in data
+    assert data["test_voice_1"]["ref_text"] == "This is a test transcript for voice 1."
+
+
+def test_register_voice_validation_errors(temp_voice_workspace: Path) -> None:
+    """Verify register_voice validation checks for invalid name, empty text, or bad language."""
+    test_audio = temp_voice_workspace / "refs" / "v1.wav"
+
+    with pytest.raises(ValueError, match="Invalid voice identifier"):
+        voices.registry.register_voice("bad voice with spaces", test_audio, "text", ["en"])
+
+    with pytest.raises(ValueError, match="ref_text"):
+        voices.registry.register_voice("good_voice", test_audio, "   ", ["en"])
+
+    with pytest.raises(ValueError, match="Unsupported language 'es'"):
+        voices.registry.register_voice("good_voice", test_audio, "text", ["es"])
+
+
+def test_register_voice_thread_safety(temp_voice_workspace: Path) -> None:
+    """Verify concurrent register_voice calls safely update manifest without corruption."""
+    manifest_path = temp_voice_workspace / "concurrent_manifest.json"
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump({}, f)
+
+    test_audio = temp_voice_workspace / "refs" / "v1.wav"
+    errors = []
+
+    def worker(i: int):
+        try:
+            voices.registry.register_voice(
+                voice_name=f"thread_voice_{i}",
+                ref_audio_path=test_audio,
+                ref_text=f"Thread voice transcript number {i}",
+                languages=["en"],
+                manifest_path=manifest_path,
+            )
+        except Exception as e:
+            errors.append(e)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [executor.submit(worker, i) for i in range(8)]
+        concurrent.futures.wait(futures)
+
+    assert len(errors) == 0
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    assert len(data) == 8
 
 
 # ==============================================================================

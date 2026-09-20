@@ -94,9 +94,9 @@ class KaggleExecutionBridge:
             lang = "hi"
         else:
             lang_cleaned = str(language).strip().lower()
-            if lang_cleaned not in {"hi", "pa"}:
+            if lang_cleaned not in {"en", "hi", "pa"}:
                 raise ValueError(
-                    f"Unsupported language '{language}' for Kaggle GPU bridge. Supported languages: ['hi', 'pa']"
+                    f"Unsupported language '{language}' for Kaggle GPU bridge. Supported languages: ['en', 'hi', 'pa']"
                 )
             lang = lang_cleaned
 
@@ -760,11 +760,12 @@ class Synthesizer:
 
         # If still None but in legacy mode with language
         if target_ref_text is None and detected_lang is not None:
-            target_ref_text = (
-                "नमस्ते! संगीत की तरह जीवन भी खूबसूरत होता है।"
-                if detected_lang == "hi"
-                else "ਇੱਕ ਵਾਰ ਦੀ ਗੱਲ ਹੈ, ਪੁਰਾਣੇ ਪਿੰਡ ਵਿੱਚ ਇੱਕ ਬਜ਼ੁਰਗ ਕਹਾਣੀਕਾਰ ਰਹਿੰਦਾ ਸੀ।"
-            )
+            if detected_lang == "hi":
+                target_ref_text = "नमस्ते! संगीत की तरह जीवन भी खूबसूरत होता है।"
+            elif detected_lang == "pa":
+                target_ref_text = "ਇੱਕ ਵਾਰ ਦੀ ਗੱਲ ਹੈ, ਪੁਰਾਣੇ ਪਿੰਡ ਵਿੱਚ ਇੱਕ ਬਜ਼ੁਰਗ ਕਹਾਣੀਕਾਰ ਰਹਿੰਦਾ ਸੀ।"
+            else:
+                target_ref_text = "Some call me nature, others call me mother nature."
 
         # Validate ref_text
         if not isinstance(target_ref_text, str):

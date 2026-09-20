@@ -116,7 +116,7 @@
       word-break: break-word;
     }
 
-    button {
+    button, .btn {
       display: inline-flex;
       align-items: center;
       justify-content: center;
@@ -130,27 +130,45 @@
       color: var(--text);
       cursor: pointer;
       transition: all 0.15s ease;
+      font-family: inherit;
     }
 
-    button:hover:not(:disabled) {
+    button:hover:not(:disabled), .btn:hover:not(:disabled) {
       background-color: #27272a;
       border-color: #3f3f46;
       color: var(--accent);
     }
 
-    button:disabled {
+    button:disabled, .btn:disabled {
       opacity: 0.5;
       cursor: not-allowed;
     }
 
-    button.primary {
+    button.primary, .btn.primary {
       background-color: #27272a;
       border-color: #3f3f46;
       color: var(--accent);
     }
 
-    button.primary:hover:not(:disabled) {
+    button.primary:hover:not(:disabled), .btn.primary:hover:not(:disabled) {
       background-color: #3f3f46;
+      border-color: #52525b;
+    }
+
+    button.secondary, .btn.secondary {
+      background-color: transparent;
+      border: 1px solid var(--border);
+      color: var(--muted);
+    }
+
+    button.secondary:hover:not(:disabled), .btn.secondary:hover:not(:disabled) {
+      background-color: #18181b;
+      color: var(--text);
+      border-color: #52525b;
+    }
+
+    .btn-block {
+      width: 100%;
     }
 
     .form-group {
@@ -165,9 +183,23 @@
       color: var(--muted);
       display: flex;
       justify-content: space-between;
+      align-items: center;
     }
 
-    select, textarea, input {
+    .badge {
+      display: inline-block;
+      font-size: 0.7rem;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      padding: 2px 6px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      background: #18181b;
+      color: var(--muted);
+    }
+
+    select, textarea, input[type="text"] {
       background-color: #18181b;
       border: 1px solid var(--border);
       border-radius: 6px;
@@ -178,6 +210,18 @@
       transition: border-color 0.15s ease;
       width: 100%;
       font-family: inherit;
+    }
+
+    input[type="file"] {
+      background-color: #18181b;
+      border: 1px dashed var(--border);
+      border-radius: 6px;
+      color: var(--muted);
+      font-size: 0.8rem;
+      padding: 10px 12px;
+      outline: none;
+      width: 100%;
+      cursor: pointer;
     }
 
     select:focus, textarea:focus, input:focus {
@@ -192,6 +236,12 @@
     .char-counter {
       font-size: 0.75rem;
       color: var(--muted);
+    }
+
+    .hint-text {
+      font-size: 0.75rem;
+      color: var(--muted);
+      line-height: 1.3;
     }
 
     .alert {
@@ -229,6 +279,192 @@
       0% { transform: translateX(0) scaleX(0); }
       40% { transform: translateX(0) scaleX(0.5); }
       100% { transform: translateX(100%) scaleX(0.5); }
+    }
+
+    /* 3-Language Selector Stack */
+    .lang-selector-stack {
+      display: flex;
+      gap: 8px;
+    }
+
+    .lang-btn {
+      flex: 1;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 12px;
+      background-color: #18181b;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      transition: all 0.15s ease;
+    }
+
+    .lang-btn:hover {
+      border-color: #3f3f46;
+      color: var(--text);
+    }
+
+    .lang-btn.active {
+      border-color: var(--accent);
+      background-color: #27272a;
+      color: var(--accent);
+    }
+
+    .lang-btn.active .badge {
+      border-color: #52525b;
+      color: var(--accent);
+    }
+
+    /* Voice List Revealer */
+    .voice-list-container {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      max-height: 220px;
+      overflow-y: auto;
+      padding-right: 2px;
+    }
+
+    .voice-card {
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background-color: #18181b;
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      transition: all 0.15s ease;
+    }
+
+    .voice-card:hover {
+      border-color: #3f3f46;
+      background-color: #202024;
+    }
+
+    .voice-card.active {
+      border-color: var(--accent);
+      background-color: #27272a;
+    }
+
+    .voice-info {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .voice-name {
+      font-size: 0.85rem;
+      font-weight: 500;
+      color: var(--text);
+    }
+
+    .voice-card.active .voice-name {
+      color: var(--accent);
+    }
+
+    .voice-desc {
+      font-size: 0.75rem;
+      color: var(--muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 360px;
+    }
+
+    .voice-radio {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      border: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .voice-card.active .voice-radio {
+      border-color: var(--accent);
+    }
+
+    .voice-card.active .voice-radio::after {
+      content: "";
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background-color: var(--accent);
+    }
+
+    .empty-voices {
+      font-size: 0.825rem;
+      color: var(--muted);
+      padding: 16px;
+      text-align: center;
+      border: 1px dashed var(--border);
+      border-radius: 6px;
+      line-height: 1.4;
+    }
+
+    /* Modal / Drawer */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(9, 9, 11, 0.85);
+      backdrop-filter: blur(4px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+      padding: 16px;
+    }
+
+    .modal-card {
+      background-color: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 24px;
+      width: 100%;
+      max-width: 480px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7);
+    }
+
+    .modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .modal-header h3 {
+      font-size: 1.1rem;
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    .btn-close {
+      background: none;
+      border: none;
+      color: var(--muted);
+      font-size: 1.35rem;
+      cursor: pointer;
+      padding: 0 4px;
+      line-height: 1;
+    }
+
+    .btn-close:hover {
+      color: var(--accent);
+    }
+
+    .modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      margin-top: 6px;
     }
 
     #output-container {
@@ -291,19 +527,43 @@
         <span>Speech Synthesis</span>
       </div>
 
+      <!-- Hidden compatibility selects -->
+      <select id="language-select" style="display: none;">
+        <option value="en" selected>English</option>
+        <option value="hi">Hindi</option>
+        <option value="pa">Punjabi</option>
+      </select>
+      <select id="voice-select" style="display: none;"></select>
+
+      <!-- 3-Language Selector Stack -->
       <div class="form-group">
-        <label for="language-select">Target Language</label>
-        <select id="language-select">
-          <option value="hi" selected>Hindi (hi)</option>
-          <option value="pa">Punjabi (pa)</option>
-        </select>
+        <label>Language Category</label>
+        <div class="lang-selector-stack" id="lang-selector-stack">
+          <button type="button" class="lang-btn active" data-lang="en">
+            <span>English</span>
+            <span class="badge">EN</span>
+          </button>
+          <button type="button" class="lang-btn" data-lang="hi">
+            <span>Hindi</span>
+            <span class="badge">HI</span>
+          </button>
+          <button type="button" class="lang-btn" data-lang="pa">
+            <span>Punjabi</span>
+            <span class="badge">PA</span>
+          </button>
+        </div>
       </div>
 
+      <!-- Dynamic Voice Revealer -->
       <div class="form-group">
-        <label for="voice-select">Voice Model</label>
-        <select id="voice-select">
-          <option value="">Loading voices...</option>
-        </select>
+        <label>
+          <span>Available Voices</span>
+          <span id="selected-voice-badge" class="badge">Loading...</span>
+        </label>
+        <div class="voice-list-container" id="voice-list-container">
+          <!-- Dynamically populated voice items -->
+        </div>
+        <button type="button" class="btn secondary btn-block" id="btn-open-clone">+ Clone New Voice</button>
       </div>
 
       <div class="form-group">
@@ -329,12 +589,61 @@
     </div>
   </div>
 
+  <!-- Clone Voice Modal -->
+  <div id="clone-modal" class="modal-backdrop" style="display: none;">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>Clone New Voice</h3>
+        <button type="button" class="btn-close" id="btn-close-clone">&times;</button>
+      </div>
+      <form id="clone-voice-form">
+        <div class="form-group">
+          <label for="clone-name">Voice Name</label>
+          <input type="text" id="clone-name" required placeholder="e.g. Rachel Studio">
+        </div>
+        <div class="form-group">
+          <label for="clone-id">Voice Identifier (slug)</label>
+          <input type="text" id="clone-id" required placeholder="e.g. rachel_studio">
+        </div>
+        <div class="form-group">
+          <label for="clone-lang">Target Language</label>
+          <select id="clone-lang" required>
+            <option value="en">English (en)</option>
+            <option value="hi">Hindi (hi)</option>
+            <option value="pa">Punjabi (pa)</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="clone-audio">Reference Audio Sample</label>
+          <input type="file" id="clone-audio" accept="audio/*,.wav,.mp3,.flac,.ogg,.m4a" required>
+          <span class="hint-text">Upload 3–12 seconds of clear speech without background noise.</span>
+        </div>
+        <div class="form-group">
+          <label for="clone-transcript">Reference Transcript</label>
+          <textarea id="clone-transcript" rows="3" required placeholder="Exact spoken words in the reference audio clip..."></textarea>
+        </div>
+
+        <div id="clone-alert" class="alert error"></div>
+        <div class="progress-bar-container" id="clone-progress">
+          <div class="progress-bar-value"></div>
+        </div>
+
+        <div class="modal-actions">
+          <button type="button" class="btn secondary" id="btn-cancel-clone">Cancel</button>
+          <button type="submit" class="btn primary" id="btn-submit-clone">Start Voice Cloning</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <script>
     // State machine variables
     let currentState = "IDLE";
     let pollIntervalId = null;
+    let selectedLanguage = "en";
+    let selectedVoice = "";
 
-    // Elements
+    // DOM Elements
     const statusDot = document.getElementById("status-dot");
     const statusLabel = document.getElementById("status-label");
     const statusMessage = document.getElementById("status-message");
@@ -344,6 +653,11 @@
     const synthesisCard = document.getElementById("synthesis-card");
     const languageSelect = document.getElementById("language-select");
     const voiceSelect = document.getElementById("voice-select");
+    const langSelectorStack = document.getElementById("lang-selector-stack");
+    const voiceListContainer = document.getElementById("voice-list-container");
+    const selectedVoiceBadge = document.getElementById("selected-voice-badge");
+    const btnOpenClone = document.getElementById("btn-open-clone");
+
     const scriptInput = document.getElementById("script-input");
     const charCounter = document.getElementById("char-counter");
     const generateBtn = document.getElementById("generate-btn");
@@ -351,6 +665,20 @@
     const outputContainer = document.getElementById("output-container");
     const audioPlayer = document.getElementById("audio-player");
     const downloadLink = document.getElementById("download-link");
+
+    // Modal elements
+    const cloneModal = document.getElementById("clone-modal");
+    const btnCloseClone = document.getElementById("btn-close-clone");
+    const btnCancelClone = document.getElementById("btn-cancel-clone");
+    const cloneForm = document.getElementById("clone-voice-form");
+    const cloneName = document.getElementById("clone-name");
+    const cloneId = document.getElementById("clone-id");
+    const cloneLang = document.getElementById("clone-lang");
+    const cloneAudio = document.getElementById("clone-audio");
+    const cloneTranscript = document.getElementById("clone-transcript");
+    const cloneAlert = document.getElementById("clone-alert");
+    const cloneProgress = document.getElementById("clone-progress");
+    const btnSubmitClone = document.getElementById("btn-submit-clone");
 
     function showError(message) {
       if (!message) {
@@ -360,6 +688,16 @@
       }
       errorAlert.style.display = "block";
       errorAlert.textContent = message;
+    }
+
+    function showCloneError(message) {
+      if (!message) {
+        cloneAlert.style.display = "none";
+        cloneAlert.textContent = "";
+        return;
+      }
+      cloneAlert.style.display = "block";
+      cloneAlert.textContent = message;
     }
 
     function updateStateUI(state, message) {
@@ -387,7 +725,7 @@
         startBtn.style.display = "none";
         synthesisCard.style.display = "flex";
         stopPolling();
-        loadVoices(languageSelect.value);
+        loadVoices(selectedLanguage);
       } else if (state === "ERROR") {
         statusMessage.textContent = message || "An error occurred during session startup.";
         startBtn.disabled = false;
@@ -445,35 +783,233 @@
       }
     }
 
+    function formatVoiceName(slug) {
+      return slug.replace(/_/g, " ").replace(/\b\w/g, l => l.toUpperCase());
+    }
+
     async function loadVoices(language) {
-      voiceSelect.innerHTML = "<option value=''>Loading voices...</option>";
+      voiceListContainer.innerHTML = "<div class='empty-voices'>Loading voices...</div>";
+      selectedVoiceBadge.textContent = "Loading...";
+
       try {
         const resp = await fetch(`/voices?language=${encodeURIComponent(language)}`);
         if (!resp.ok) throw new Error("Failed to load voices");
         const data = await resp.json();
         const voices = data.voices || [];
+
+        voiceListContainer.innerHTML = "";
         voiceSelect.innerHTML = "";
+
         if (voices.length === 0) {
-          voiceSelect.innerHTML = "<option value=''>No voices available</option>";
+          voiceListContainer.innerHTML = "<div class='empty-voices'>No cloned voices available for this language. Click below to clone your first voice.</div>";
+          selectedVoice = "";
+          selectedVoiceBadge.textContent = "None";
           return;
         }
+
         voices.forEach(voice => {
           const opt = document.createElement("option");
           opt.value = voice;
-          opt.textContent = voice;
+          opt.textContent = formatVoiceName(voice);
           voiceSelect.appendChild(opt);
         });
+
+        // Keep current selection if valid for language, otherwise choose first
+        if (!voices.includes(selectedVoice)) {
+          selectedVoice = voices[0];
+        }
+
+        voices.forEach(voice => {
+          const card = document.createElement("div");
+          card.className = "voice-card" + (voice === selectedVoice ? " active" : "");
+          card.setAttribute("data-voice", voice);
+
+          const info = document.createElement("div");
+          info.className = "voice-info";
+
+          const nameSpan = document.createElement("span");
+          nameSpan.className = "voice-name";
+          nameSpan.textContent = formatVoiceName(voice);
+
+          const descSpan = document.createElement("span");
+          descSpan.className = "voice-desc";
+          descSpan.textContent = voice;
+
+          info.appendChild(nameSpan);
+          info.appendChild(descSpan);
+
+          const radio = document.createElement("div");
+          radio.className = "voice-radio";
+
+          card.appendChild(info);
+          card.appendChild(radio);
+
+          card.addEventListener("click", () => {
+            selectVoice(voice);
+          });
+
+          voiceListContainer.appendChild(card);
+        });
+
+        selectVoice(selectedVoice);
       } catch (err) {
         console.error("Error loading voices:", err);
-        voiceSelect.innerHTML = "<option value=''>Error loading voices</option>";
+        voiceListContainer.innerHTML = "<div class='empty-voices'>Error loading voices</div>";
+        selectedVoiceBadge.textContent = "Error";
       }
     }
+
+    function selectVoice(voiceId) {
+      selectedVoice = voiceId;
+      voiceSelect.value = voiceId;
+      selectedVoiceBadge.textContent = formatVoiceName(voiceId);
+
+      const cards = voiceListContainer.querySelectorAll(".voice-card");
+      cards.forEach(card => {
+        if (card.getAttribute("data-voice") === voiceId) {
+          card.classList.add("active");
+        } else {
+          card.classList.remove("active");
+        }
+      });
+    }
+
+    // Auto-generate slug from voice name
+    cloneName.addEventListener("input", () => {
+      const slug = cloneName.value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+      cloneId.value = slug;
+    });
+
+    function openCloneModal() {
+      showCloneError("");
+      cloneLang.value = selectedLanguage;
+      cloneModal.style.display = "flex";
+      cloneName.focus();
+    }
+
+    function closeCloneModal() {
+      cloneModal.style.display = "none";
+      cloneForm.reset();
+      showCloneError("");
+    }
+
+    btnOpenClone.addEventListener("click", openCloneModal);
+    btnCloseClone.addEventListener("click", closeCloneModal);
+    btnCancelClone.addEventListener("click", closeCloneModal);
+
+    cloneForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      showCloneError("");
+
+      const name = cloneName.value.trim();
+      const id = cloneId.value.trim();
+      const lang = cloneLang.value;
+      const file = cloneAudio.files[0];
+      const transcript = cloneTranscript.value.trim();
+
+      if (!name) {
+        showCloneError("Please enter a voice display name.");
+        return;
+      }
+      if (!id || !/^[a-zA-Z0-9_-]+$/.test(id)) {
+        showCloneError("Voice identifier must contain only letters, numbers, underscores, or dashes.");
+        return;
+      }
+      if (!file) {
+        showCloneError("Please select a reference audio file.");
+        return;
+      }
+      if (file.size > 15 * 1024 * 1024) {
+        showCloneError("Audio file exceeds maximum size limit of 15 MB.");
+        return;
+      }
+      if (!transcript) {
+        showCloneError("Please enter the spoken transcript of the reference audio.");
+        return;
+      }
+
+      btnSubmitClone.disabled = true;
+      btnCancelClone.disabled = true;
+      cloneProgress.style.display = "block";
+
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("voice_id", id);
+      formData.append("name", name);
+      formData.append("language", lang);
+      formData.append("ref_text", transcript);
+
+      try {
+        const resp = await fetch("/voices/clone", {
+          method: "POST",
+          body: formData,
+        });
+
+        if (resp.status === 409) {
+          const errData = await resp.json();
+          showCloneError("Session not ready: " + (errData.detail || "GPU session must be started and ready."));
+          return;
+        }
+
+        if (!resp.ok) {
+          let errMsg = `Cloning failed with status ${resp.status}`;
+          try {
+            const errJson = await resp.json();
+            errMsg = errJson.detail || errJson.error || errMsg;
+          } catch (_) {
+            const errText = await resp.text();
+            if (errText) errMsg = errText;
+          }
+          showCloneError(errMsg);
+          return;
+        }
+
+        // Success (201)
+        closeCloneModal();
+        if (selectedLanguage !== lang) {
+          setActiveLanguage(lang);
+        } else {
+          await loadVoices(selectedLanguage);
+        }
+        selectVoice(id);
+      } catch (err) {
+        showCloneError("Network error: " + err.message);
+      } finally {
+        btnSubmitClone.disabled = false;
+        btnCancelClone.disabled = false;
+        cloneProgress.style.display = "none";
+      }
+    });
+
+    function setActiveLanguage(lang) {
+      selectedLanguage = lang;
+      languageSelect.value = lang;
+      const btns = langSelectorStack.querySelectorAll(".lang-btn");
+      btns.forEach(btn => {
+        if (btn.getAttribute("data-lang") === lang) {
+          btn.classList.add("active");
+        } else {
+          btn.classList.remove("active");
+        }
+      });
+      loadVoices(selectedLanguage);
+    }
+
+    // Language buttons click handling
+    langSelectorStack.addEventListener("click", (e) => {
+      const btn = e.target.closest(".lang-btn");
+      if (!btn) return;
+      const lang = btn.getAttribute("data-lang");
+      if (lang && lang !== selectedLanguage) {
+        setActiveLanguage(lang);
+      }
+    });
 
     async function handleGenerate() {
       showError("");
       const text = scriptInput.value.trim();
-      const language = languageSelect.value;
-      const voice = voiceSelect.value;
+      const language = selectedLanguage;
+      const voice = selectedVoice;
 
       if (!text) {
         showError("Please enter script text before generating.");
@@ -547,10 +1083,6 @@
 
     // Event Listeners
     startBtn.addEventListener("click", handleStartSession);
-
-    languageSelect.addEventListener("change", () => {
-      loadVoices(languageSelect.value);
-    });
 
     scriptInput.addEventListener("input", () => {
       charCounter.textContent = `${scriptInput.value.length} chars`;

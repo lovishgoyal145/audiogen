@@ -58,9 +58,10 @@ VOICE_DIR: Final[Path] = Path(__file__).resolve().parent
 REPO_ROOT: Final[Path] = VOICE_DIR.parent
 DEFAULT_MANIFEST_PATH: Final[Path] = VOICE_DIR / "registry_schema.json"
 ENV_VOICE_REGISTRY_PATH: Final[str] = "VOICE_REGISTRY_PATH"
+SUPPORTED_LANGUAGES: Final[frozenset[str]] = frozenset({"en", "hi", "pa"})
 
 # Thread-safe in-memory cache
-_REGISTRY_LOCK: Final[threading.Lock] = threading.Lock()
+_REGISTRY_LOCK: Final[threading.RLock] = threading.RLock()
 _REGISTRY_CACHE: Optional[Dict[str, Dict[str, Any]]] = None
 _CACHED_MANIFEST_PATH: Optional[Path] = None
 
@@ -172,7 +173,7 @@ def load_manifest(
                 raise ValueError(f"Voice entry '{voice_name}' has invalid 'language' type: {type(lang).__name__}")
 
             for l in entry["language"]:
-                if l not in {"hi", "pa"}:
+                if l not in SUPPORTED_LANGUAGES:
                     raise ValueError(f"Unsupported language '{l}' in voice entry '{voice_name}'")
 
             entry["ref_text"] = entry["ref_text"].strip()
@@ -194,7 +195,9 @@ def clear_registry_cache() -> None:
         _CACHED_MANIFEST_PATH = None
 
 
-def get_voice_ref(voice_name: str) -> VoiceRecord:
+def get_voice_ref(
+    voice_name: str, manifest_path: Optional[Union[str, Path]] = None
+) -> VoiceRecord:
     """Retrieve the VoiceRecord for a given voice.
 
     Validates that the voice name exists in the manifest, the reference text is
@@ -203,6 +206,7 @@ def get_voice_ref(voice_name: str) -> VoiceRecord:
 
     Args:
         voice_name: Unique voice identifier key (e.g. 'anchor_male_energetic').
+        manifest_path: Optional custom manifest file path override.
 
     Returns:
         VoiceRecord containing path, ref_text, and language list.
@@ -216,7 +220,7 @@ def get_voice_ref(voice_name: str) -> VoiceRecord:
     if not isinstance(voice_name, str):
         raise TypeError(f"Expected voice_name to be str, got {type(voice_name).__name__}")
 
-    manifest = load_manifest()
+    manifest = load_manifest(manifest_path=manifest_path)
 
     if voice_name not in manifest:
         raise VoiceNotFoundError(f"Voice '{voice_name}' not found in voice registry manifest.")
@@ -321,7 +325,94 @@ def get_voice_metadata(voice_name: str) -> Dict[str, Any]:
     return copy.deepcopy(manifest[voice_name])
 
 
+def register_voice(
+    voice_name: str,
+    ref_audio_path: Union[str, Path],
+    ref_text: str,
+    languages: Union[str, List[str]],
+    description: Optional[str] = None,
+    manifest_path: Optional[Union[str, Path]] = None,
+) -> VoiceRecord:
+    """Atomically register a new voice in registry_schema.json and update cache.
+
+    Args:
+        voice_name: Unique slug identifier for the voice (e.g. 'rachel_studio').
+        ref_audio_path: Relative or absolute path to reference audio on disk.
+        ref_text: Authentic transcript corresponding to the speech in ref_audio_path.
+        languages: Language code or list of language codes ('en', 'hi', 'pa').
+        description: Optional human-readable description.
+        manifest_path: Optional custom manifest file path override.
+
+    Returns:
+        Newly created immutable VoiceRecord.
+    """
+    import re
+
+    clean_name = str(voice_name).strip()
+    if not re.match(r"^[a-zA-Z0-9_-]+$", clean_name):
+        raise ValueError(
+            f"Invalid voice identifier '{voice_name}'. Must contain only letters, numbers, underscores, and dashes."
+        )
+
+    if not ref_text or not str(ref_text).strip():
+        raise ValueError("Reference text (ref_text) cannot be empty or whitespace-only.")
+
+    # Normalize languages
+    if isinstance(languages, str):
+        raw_langs = [languages]
+    elif isinstance(languages, list):
+        raw_langs = languages
+    else:
+        raise TypeError(f"Expected languages to be str or list, got {type(languages).__name__}")
+
+    clean_langs = [str(l).strip().lower() for l in raw_langs if str(l).strip()]
+    if not clean_langs:
+        raise ValueError("At least one language must be specified.")
+    for l in clean_langs:
+        if l not in SUPPORTED_LANGUAGES:
+            raise ValueError(f"Unsupported language '{l}'. Supported: {sorted(SUPPORTED_LANGUAGES)}")
+
+    with _REGISTRY_LOCK:
+        resolved_manifest = resolve_manifest_path(manifest_path)
+        if resolved_manifest.is_file():
+            with open(resolved_manifest, "r", encoding="utf-8") as f:
+                manifest_data = json.load(f)
+        else:
+            manifest_data = {}
+
+        # Store path relative to REPO_ROOT if possible
+        audio_path_obj = Path(ref_audio_path).resolve()
+        if not audio_path_obj.is_file():
+            raise FileNotFoundError(f"Reference audio file not found on disk: {ref_audio_path}")
+
+        try:
+            stored_path = str(audio_path_obj.relative_to(REPO_ROOT))
+        except ValueError:
+            stored_path = str(audio_path_obj)
+
+        entry: Dict[str, Any] = {
+            "path": stored_path,
+            "ref_text": str(ref_text).strip(),
+            "language": clean_langs,
+        }
+        if description and str(description).strip():
+            entry["description"] = str(description).strip()
+
+        manifest_data[clean_name] = entry
+
+        # Atomic write via temp file
+        temp_manifest = resolved_manifest.with_suffix(f".tmp_{os.getpid()}")
+        with open(temp_manifest, "w", encoding="utf-8") as f:
+            json.dump(manifest_data, f, indent=2)
+        os.replace(temp_manifest, resolved_manifest)
+
+        # Invalidate and reload cache
+        clear_registry_cache()
+        return get_voice_ref(clean_name, manifest_path=resolved_manifest)
+
+
 __all__ = [
+    "SUPPORTED_LANGUAGES",
     "VoiceNotFoundError",
     "VoiceRecord",
     "resolve_manifest_path",
@@ -330,4 +421,5 @@ __all__ = [
     "get_voice_ref",
     "list_voices",
     "get_voice_metadata",
+    "register_voice",
 ]

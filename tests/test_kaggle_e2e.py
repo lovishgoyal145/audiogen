@@ -256,7 +256,7 @@ def test_stage_execution_creates_valid_manifests_and_notebook(
         # Verify unsupported language raises ValueError without silent coercion
         with pytest.raises(
             ValueError,
-            match=r"Unsupported language 'es' for Kaggle GPU bridge\. Supported languages: \['hi', 'pa'\]",
+            match=r"Unsupported language 'es' for Kaggle GPU bridge\. Supported languages: \['en', 'hi', 'pa'\]",
         ):
             bridge.stage_execution(
                 text="Test spanish",

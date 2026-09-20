@@ -452,3 +452,234 @@ def test_get_root_serves_ui_index_html(client: TestClient) -> None:
     assert "Start Session" in resp.text
     assert "id=\"start-btn\"" in resp.text
     assert "id=\"synthesis-card\"" in resp.text
+
+
+def test_get_voices_english(client: TestClient) -> None:
+    """Verify GET /voices?language=en queries voice registry for English voices."""
+    with patch("voices.registry.list_voices", return_value=["narrator_english_neutral"]) as mock_list:
+        resp = client.get("/voices?language=en")
+        assert resp.status_code == 200
+        assert resp.json() == {"voices": ["narrator_english_neutral"]}
+        mock_list.assert_called_with("en")
+
+
+@pytest.mark.parametrize("non_ready_state", ["IDLE", "STARTING", "ERROR"])
+def test_gateway_clone_voice_rejects_when_not_ready_returns_409(
+    client: TestClient,
+    test_gateway: SessionGateway,
+    non_ready_state: str,
+) -> None:
+    """Verify POST /voices/clone returns HTTP 409 when session is not READY."""
+    test_gateway._state = non_ready_state
+    test_gateway._status_message = f"In {non_ready_state} state"
+
+    resp = client.post(
+        "/voices/clone",
+        data={
+            "voice_id": "test_clone",
+            "language": "en",
+            "ref_text": "Sample text",
+        },
+        files={"file": ("test.wav", b"RIFFfakebytes", "audio/wav")},
+    )
+    assert resp.status_code == 409
+    data = resp.json()
+    assert data["error"] == "session not ready"
+    assert data["status"] == non_ready_state
+
+
+def test_gateway_clone_voice_proxies_when_ready_returns_201(
+    client: TestClient,
+    test_gateway: SessionGateway,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify POST /voices/clone proxies to remote worker when READY and saves locally."""
+    test_gateway._state = "READY"
+    test_gateway._tunnel_url = "https://tunnel.trycloudflare.com"
+    test_gateway.bearer_token = "secret-token-gw"
+
+    # Mock audio bytes
+    mock_wav = b"RIFFvalidwavbytes"
+
+    mock_resp_json = {
+        "status": "success",
+        "voice": {
+            "id": "gw_cloned_voice",
+            "name": "Gw Cloned Voice",
+            "language": ["en"],
+            "ref_text": "Spoken words transcript",
+        },
+    }
+
+    async def mock_post(url: str, files: dict, data: dict, headers: dict, **kwargs):
+        assert url == "https://tunnel.trycloudflare.com/voices/clone"
+        assert headers.get("Authorization") == "Bearer secret-token-gw"
+        assert data["voice_id"] == "gw_cloned_voice"
+        assert data["language"] == "en"
+        return httpx.Response(
+            status_code=201,
+            json=mock_resp_json,
+            headers={"content-type": "application/json"},
+        )
+
+    try:
+        with patch("httpx.AsyncClient.post", side_effect=mock_post), \
+             patch("voices.registry.register_voice") as mock_reg:
+            resp = client.post(
+                "/voices/clone",
+                data={
+                    "voice_id": "gw_cloned_voice",
+                    "language": "en",
+                    "ref_text": "Spoken words transcript",
+                    "name": "Gw Cloned Voice",
+                },
+                files={"file": ("sample.wav", mock_wav, "audio/wav")},
+            )
+            assert resp.status_code == 201
+            assert resp.json() == mock_resp_json
+            mock_reg.assert_called_once()
+    finally:
+        f = voices.registry.REPO_ROOT / "voices" / "refs" / "gw_cloned_voice.wav"
+        if f.exists():
+            f.unlink()
+
+
+def test_gateway_clone_voice_remote_error_returns_502(
+    client: TestClient,
+    test_gateway: SessionGateway,
+) -> None:
+    """Verify network failure during clone forwarding returns 502 Bad Gateway."""
+    test_gateway._state = "READY"
+    test_gateway._tunnel_url = "https://tunnel.trycloudflare.com"
+
+    with patch("httpx.AsyncClient.post", side_effect=httpx.ConnectError("Connection refused")):
+        resp = client.post(
+            "/voices/clone",
+            data={
+                "voice_id": "gw_cloned_fail",
+                "language": "en",
+                "ref_text": "Text",
+            },
+            files={"file": ("sample.wav", b"123", "audio/wav")},
+        )
+        assert resp.status_code == 502
+        assert "Failed to forward clone request" in resp.json()["error"]
+
+
+def test_gateway_generate_accepts_english(
+    client: TestClient,
+    test_gateway: SessionGateway,
+) -> None:
+    """Verify POST /generate with language 'en' is proxied cleanly to remote server."""
+    test_gateway._state = "READY"
+    test_gateway._tunnel_url = "https://tunnel.trycloudflare.com"
+    test_gateway.bearer_token = "secret-token-gw"
+
+    payload = {
+        "text": "Hello world in English",
+        "language": "en",
+        "speaker_ref_name": "narrator_english_neutral",
+    }
+
+    mock_audio = b"RIFFaudioeng"
+
+    async def mock_post(url: str, json: dict, headers: dict, **kwargs):
+        assert json["language"] == "en"
+        assert headers.get("Authorization") == "Bearer secret-token-gw"
+        assert headers.get("X-Server-Secret") == "secret-token-gw"
+        assert headers.get("Content-Type") == "application/json"
+        return httpx.Response(
+            status_code=200,
+            content=mock_audio,
+            headers={"content-type": "audio/wav"},
+        )
+
+    with patch("httpx.AsyncClient.post", side_effect=mock_post):
+        resp = client.post("/generate", json=payload)
+        assert resp.status_code == 200
+        assert resp.content == mock_audio
+
+
+def test_gateway_clone_voice_rejects_empty_or_invalid_voice_id(
+    client: TestClient,
+    test_gateway: SessionGateway,
+) -> None:
+    """Verify POST /voices/clone with invalid or empty voice_id returns 400."""
+    test_gateway._state = "READY"
+    test_gateway._tunnel_url = "https://tunnel.trycloudflare.com"
+
+    resp = client.post(
+        "/voices/clone",
+        data={
+            "voice_id": "???///",
+            "language": "en",
+            "ref_text": "Sample text",
+        },
+        files={"file": ("sample.wav", b"RIFFbytes", "audio/wav")},
+    )
+    assert resp.status_code == 400
+    assert "Invalid voice_id" in resp.json()["error"]
+
+
+def test_gateway_clone_voice_normalizes_persisted_audio_to_24k_mono(
+    client: TestClient,
+    test_gateway: SessionGateway,
+) -> None:
+    """Verify audio persisted by gateway is normalized to 24 kHz mono 16-bit PCM WAV."""
+    import io
+    import soundfile as sf
+    import numpy as np
+
+    test_gateway._state = "READY"
+    test_gateway._tunnel_url = "https://tunnel.trycloudflare.com"
+    test_gateway.bearer_token = "secret-token-gw"
+
+    # Create a 16 kHz stereo audio buffer
+    sr_input = 16000
+    t = np.linspace(0, 1.5, int(sr_input * 1.5), endpoint=False)
+    stereo_data = np.column_stack([0.2 * np.sin(2 * np.pi * 440 * t), 0.2 * np.sin(2 * np.pi * 880 * t)])
+    buf = io.BytesIO()
+    sf.write(buf, stereo_data, sr_input, format="WAV", subtype="PCM_16")
+    audio_bytes = buf.getvalue()
+
+    mock_resp_json = {
+        "status": "success",
+        "voice": {
+            "id": "gw_norm_voice",
+            "name": "Gw Norm Voice",
+            "language": ["en"],
+            "ref_text": "Test transcript",
+        },
+    }
+
+    async def mock_post(url: str, files: dict, data: dict, headers: dict, **kwargs):
+        return httpx.Response(
+            status_code=201,
+            json=mock_resp_json,
+            headers={"content-type": "application/json"},
+        )
+
+    target_path = voices.registry.REPO_ROOT / "voices" / "refs" / "gw_norm_voice.wav"
+    try:
+        with patch("httpx.AsyncClient.post", side_effect=mock_post), \
+             patch("voices.registry.register_voice"):
+            resp = client.post(
+                "/voices/clone",
+                data={
+                    "voice_id": "gw_norm_voice",
+                    "language": "en",
+                    "ref_text": "Test transcript",
+                },
+                files={"file": ("sample.wav", audio_bytes, "audio/wav")},
+            )
+            assert resp.status_code == 201
+            assert target_path.exists()
+            info = sf.info(str(target_path))
+            assert info.samplerate == 24000
+            assert info.channels == 1
+            assert info.subtype == "PCM_16"
+    finally:
+        if target_path.exists():
+            target_path.unlink()
+

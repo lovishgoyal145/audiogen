@@ -9,16 +9,17 @@ import io
 import logging
 import os
 from pathlib import Path
+import re
 import secrets
 import sys
 import tempfile
 import time
-from typing import Any, AsyncGenerator, Dict, Final, List, Optional, Union
+from typing import Any, AsyncGenerator, Dict, Final, List, Optional, Tuple, Union
 import numpy as np
 from pydantic import BaseModel, Field
 import soundfile as sf
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, Response, UploadFile, status
 from fastapi.responses import JSONResponse
 
 # Attempt import from audiogen or core fallback
@@ -80,10 +81,51 @@ def cleanup_generated_files(
 class GenerateRequest(BaseModel):
     """Payload schema for /generate endpoint."""
 
-    text: str = Field(..., description="Text in Hindi or Punjabi to synthesize")
-    language: str = Field(..., description="Language code ('hi' or 'pa')")
+    text: str = Field(..., description="Text in English, Hindi, or Punjabi to synthesize")
+    language: str = Field(..., description="Language code ('en', 'hi', or 'pa')")
     speaker_ref_name: str = Field(..., description="Voice name matching voices registry manifest")
     return_uri: bool = Field(default=False, description="If True, returns file URI instead of binary audio")
+
+
+def process_and_resample_audio(
+    audio_bytes: bytes, min_duration: float = 1.0, max_duration: float = 30.0
+) -> Tuple[np.ndarray, int]:
+    """Decode uploaded audio, validate duration and non-silence, resample to 24 kHz mono."""
+    from pydub import AudioSegment
+
+    try:
+        seg = AudioSegment.from_file(io.BytesIO(audio_bytes))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Could not decode audio file: {exc}",
+        )
+
+    duration_sec = len(seg) / 1000.0
+    if duration_sec < min_duration:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Reference audio too short ({duration_sec:.2f}s). Minimum duration is {min_duration:.1f} second(s).",
+        )
+    if duration_sec > max_duration:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Reference audio too long ({duration_sec:.2f}s). Maximum duration is {max_duration:.1f} seconds.",
+        )
+
+    # Convert to 24000 Hz, 1 channel (mono), 16-bit
+    seg = seg.set_frame_rate(24000).set_channels(1).set_sample_width(2)
+
+    # Extract samples
+    samples = np.array(seg.get_array_of_samples(), dtype=np.float32) / 32768.0
+    max_amp = float(np.max(np.abs(samples))) if len(samples) > 0 else 0.0
+    if max_amp < 1e-4:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Reference audio is silent or contains zero amplitude.",
+        )
+
+    return samples, 24000
 
 
 class HealthResponse(BaseModel):
@@ -245,7 +287,7 @@ def create_app(
 
         # 2. Validate language
         lang = payload.language.strip().lower()
-        if lang not in ("hi", "pa"):
+        if lang not in ("en", "hi", "pa"):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Unsupported language: {payload.language}",
@@ -330,6 +372,157 @@ def create_app(
         buffer = io.BytesIO()
         sf.write(buffer, np.asarray(waveform, dtype=np.float32), int(sample_rate), format="WAV", subtype="PCM_16")
         return Response(content=buffer.getvalue(), media_type="audio/wav")
+
+    @app.post(
+        "/voices/clone",
+        status_code=status.HTTP_201_CREATED,
+        responses={
+            201: {"description": "Voice successfully cloned and registered"},
+            400: {"model": ErrorResponse},
+            401: {"model": ErrorResponse},
+            500: {"model": ErrorResponse},
+        },
+    )
+    async def clone_voice(
+        file: UploadFile = File(..., description="Reference audio file (WAV, MP3, FLAC)"),
+        voice_id: str = Form(..., description="Unique voice identifier slug"),
+        language: str = Form(..., description="Target language code ('en', 'hi', 'pa')"),
+        ref_text: str = Form(..., description="Spoken transcript of the reference audio"),
+        name: Optional[str] = Form(None, description="Display name"),
+        description: Optional[str] = Form(None, description="Voice description"),
+        request: Request = None,
+        _token: str = Depends(verify_bearer_token),
+    ) -> JSONResponse:
+        active_watchdog = getattr(app.state, "watchdog", None)
+        if active_watchdog is not None:
+            active_watchdog.touch()
+
+        # 1. Validate fields
+        clean_id = re.sub(r"[^a-zA-Z0-9_-]", "", voice_id.strip())
+        if not clean_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Voice identifier must contain alphanumeric characters.",
+            )
+
+        clean_lang = language.strip().lower()
+        if clean_lang not in ("en", "hi", "pa"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unsupported language '{language}'. Allowed: ['en', 'hi', 'pa']",
+            )
+
+        if not ref_text or not ref_text.strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Reference transcript (ref_text) cannot be empty.",
+            )
+
+        # 2. Read and process audio
+        raw_bytes = await file.read()
+        if not raw_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Uploaded audio file is empty.",
+            )
+
+        samples, sr = process_and_resample_audio(raw_bytes)
+
+        # 3. Write normalized WAV to voices/refs/
+        ref_dir = voices.registry.REPO_ROOT / "voices" / "refs"
+        ref_dir.mkdir(parents=True, exist_ok=True)
+        out_path = ref_dir / f"{clean_id}.wav"
+        sf.write(str(out_path), samples, sr, subtype="PCM_16")
+
+        # 4. Perform GPU verification pass under inference_lock
+        inference_engine = getattr(app.state, "synthesizer", None)
+        if inference_engine is not None:
+            async with app.state.inference_lock:
+                try:
+                    loop = asyncio.get_running_loop()
+                    # Run short verification pass (first 30 chars of ref_text)
+                    await loop.run_in_executor(
+                        None,
+                        functools.partial(
+                            inference_engine.synthesize,
+                            text=ref_text.strip()[:30],
+                            ref_audio_path=str(out_path),
+                            ref_text=ref_text.strip(),
+                        ),
+                    )
+                except Exception as exc:
+                    logger.error("GPU verification pass failed: %s", exc)
+                    if out_path.exists():
+                        out_path.unlink()
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail=f"GPU verification failed: {exc}",
+                    )
+
+        # 5. Register in voice registry
+        display_name = name.strip() if (name and name.strip()) else clean_id.replace("_", " ").title()
+        rec = voices.registry.register_voice(
+            voice_name=clean_id,
+            ref_audio_path=out_path,
+            ref_text=ref_text.strip(),
+            languages=[clean_lang],
+            description=description.strip() if description else f"Cloned voice: {display_name}",
+        )
+
+        if active_watchdog is not None:
+            active_watchdog.touch()
+
+        return JSONResponse(
+            status_code=status.HTTP_201_CREATED,
+            content={
+                "status": "success",
+                "voice": {
+                    "id": clean_id,
+                    "name": display_name,
+                    "speaker_ref_name": clean_id,
+                    "language": rec.language,
+                    "ref_text": rec.ref_text,
+                    "description": rec.description,
+                    "path": rec.path,
+                    "duration_seconds": round(len(samples) / sr, 2),
+                },
+            },
+        )
+
+    @app.post("/voices/sync")
+    async def sync_voices(
+        request: Request,
+        _token: str = Depends(verify_bearer_token),
+    ) -> JSONResponse:
+        """Sync endpoint to reload manifest and report available voices on remote worker."""
+        active_watchdog = getattr(app.state, "watchdog", None)
+        if active_watchdog is not None:
+            active_watchdog.touch()
+        voices.registry.clear_registry_cache()
+        manifest = voices.registry.load_manifest(force_reload=True)
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={
+                "status": "synced",
+                "voices": list(manifest.keys()),
+                "count": len(manifest),
+            },
+        )
+
+    @app.get("/voices")
+    async def get_voices(language: Optional[str] = None) -> JSONResponse:
+        """List registered voices, optionally filtered by language."""
+        if language is not None:
+            clean_lang = language.strip().lower()
+            if clean_lang not in ("en", "hi", "pa"):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Unsupported language filter: '{language}'. Supported: ['en', 'hi', 'pa']",
+                )
+            voice_list = voices.registry.list_voices(language=clean_lang)
+        else:
+            voice_list = voices.registry.list_voices()
+        return JSONResponse(status_code=status.HTTP_200_OK, content={"voices": voice_list})
 
     return app
 

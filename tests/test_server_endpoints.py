@@ -220,7 +220,7 @@ def test_generate_validation_unsupported_language_returns_400(app_and_client: Tu
     _, client = app_and_client
     headers = {"Authorization": "Bearer test-secret-token"}
 
-    for bad_lang in ["en", "fr", "de"]:
+    for bad_lang in ["es", "fr", "de"]:
         res = client.post(
             "/generate",
             json={"text": "Hello", "language": bad_lang, "speaker_ref_name": "anchor_male_energetic"},
@@ -697,3 +697,241 @@ def test_cleanup_generated_files_retention_and_age(tmp_path: Path) -> None:
     cleanup_generated_files(target_dir, max_files=2, max_age_seconds=86400.0)
     remaining = list(target_dir.glob("*.wav"))
     assert len(remaining) <= 2
+
+
+def _create_test_audio_bytes(duration_sec: float = 2.0, sample_rate: int = 24000, silent: bool = False) -> bytes:
+    import io
+    import math
+    import struct
+    import wave
+
+    sr = int(sample_rate)
+    n = int(sr * duration_sec)
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sr)
+        if silent:
+            data = struct.pack(f"<{n}h", *(0 for _ in range(n)))
+        else:
+            data = struct.pack(
+                f"<{n}h",
+                *(int(10000 * math.sin(2 * math.pi * 440 * i / sr)) for i in range(n)),
+            )
+        wf.writeframes(data)
+    return buf.getvalue()
+
+
+def test_generate_accepts_english_language(app_and_client: Tuple[Any, TestClient]) -> None:
+    """Verify POST /generate with language 'en' returns 200 WAV binary."""
+    _, client = app_and_client
+    headers = {"Authorization": "Bearer test-secret-token"}
+    res = client.post(
+        "/generate",
+        json={
+            "text": "Hello world, this is a test.",
+            "language": "en",
+            "speaker_ref_name": "narrator_english_neutral",
+        },
+        headers=headers,
+    )
+    assert res.status_code == 200
+    assert res.headers["content-type"] == "audio/wav"
+    assert len(res.content) > 0
+
+
+def test_clone_voice_missing_auth_returns_401(app_and_client: Tuple[Any, TestClient]) -> None:
+    """Verify POST /voices/clone returns 401 without bearer token."""
+    _, client = app_and_client
+    audio_bytes = _create_test_audio_bytes(2.0)
+    res = client.post(
+        "/voices/clone",
+        data={
+            "voice_id": "test_clone_1",
+            "language": "en",
+            "ref_text": "This is test transcript.",
+        },
+        files={"file": ("test.wav", audio_bytes, "audio/wav")},
+    )
+    assert res.status_code == 401
+
+
+def test_clone_voice_short_audio_returns_400(app_and_client: Tuple[Any, TestClient]) -> None:
+    """Verify POST /voices/clone returns 400 when audio duration is < 1.0s."""
+    _, client = app_and_client
+    headers = {"Authorization": "Bearer test-secret-token"}
+    audio_bytes = _create_test_audio_bytes(0.5)
+    res = client.post(
+        "/voices/clone",
+        data={
+            "voice_id": "test_clone_short",
+            "language": "en",
+            "ref_text": "This is test transcript.",
+        },
+        files={"file": ("test.wav", audio_bytes, "audio/wav")},
+        headers=headers,
+    )
+    assert res.status_code == 400
+    assert "too short" in res.json()["detail"]
+
+
+def test_clone_voice_silent_audio_returns_400(app_and_client: Tuple[Any, TestClient]) -> None:
+    """Verify POST /voices/clone returns 400 when audio is silent."""
+    _, client = app_and_client
+    headers = {"Authorization": "Bearer test-secret-token"}
+    audio_bytes = _create_test_audio_bytes(2.0, silent=True)
+    res = client.post(
+        "/voices/clone",
+        data={
+            "voice_id": "test_clone_silent",
+            "language": "en",
+            "ref_text": "This is test transcript.",
+        },
+        files={"file": ("test.wav", audio_bytes, "audio/wav")},
+        headers=headers,
+    )
+    assert res.status_code == 400
+    assert "silent" in res.json()["detail"]
+
+
+def test_clone_voice_empty_ref_text_returns_400(app_and_client: Tuple[Any, TestClient]) -> None:
+    """Verify POST /voices/clone returns 400 when ref_text is empty or whitespace."""
+    _, client = app_and_client
+    headers = {"Authorization": "Bearer test-secret-token"}
+    audio_bytes = _create_test_audio_bytes(2.0)
+    res = client.post(
+        "/voices/clone",
+        data={
+            "voice_id": "test_clone_empty_text",
+            "language": "en",
+            "ref_text": "   ",
+        },
+        files={"file": ("test.wav", audio_bytes, "audio/wav")},
+        headers=headers,
+    )
+    assert res.status_code == 400
+    assert "ref_text" in res.json()["detail"]
+
+
+def test_clone_voice_unsupported_language_returns_400(app_and_client: Tuple[Any, TestClient]) -> None:
+    """Verify POST /voices/clone returns 400 for unsupported language."""
+    _, client = app_and_client
+    headers = {"Authorization": "Bearer test-secret-token"}
+    audio_bytes = _create_test_audio_bytes(2.0)
+    res = client.post(
+        "/voices/clone",
+        data={
+            "voice_id": "test_clone_bad_lang",
+            "language": "es",
+            "ref_text": "Hola mundo.",
+        },
+        files={"file": ("test.wav", audio_bytes, "audio/wav")},
+        headers=headers,
+    )
+    assert res.status_code == 400
+    assert "Unsupported language" in res.json()["detail"]
+
+
+def test_clone_voice_valid_request_returns_201_and_can_generate(
+    app_and_client: Tuple[Any, TestClient],
+) -> None:
+    """Verify POST /voices/clone returns 201 Created and voice can be synthesized."""
+    _, client = app_and_client
+    headers = {"Authorization": "Bearer test-secret-token"}
+    audio_bytes = _create_test_audio_bytes(3.5)
+    try:
+        res = client.post(
+            "/voices/clone",
+            data={
+                "voice_id": "cloned_test_voice",
+                "language": "en",
+                "ref_text": "This is the transcript of the cloned voice.",
+                "name": "Cloned Test Voice",
+                "description": "A cloned test voice for unit testing",
+            },
+            files={"file": ("cloned.wav", audio_bytes, "audio/wav")},
+            headers=headers,
+        )
+        assert res.status_code == 201
+        data = res.json()
+        assert data["status"] == "success"
+        assert data["voice"]["id"] == "cloned_test_voice"
+        assert data["voice"]["name"] == "Cloned Test Voice"
+        assert "en" in data["voice"]["language"]
+
+        # Verify new voice can now be used in /generate
+        gen_res = client.post(
+            "/generate",
+            json={
+                "text": "Hello synthesized using cloned voice!",
+                "language": "en",
+                "speaker_ref_name": "cloned_test_voice",
+            },
+            headers=headers,
+        )
+        assert gen_res.status_code == 200
+        assert gen_res.headers["content-type"] == "audio/wav"
+    finally:
+        schema_file = voices.registry.DEFAULT_MANIFEST_PATH
+        if schema_file.is_file():
+            import json
+            with open(schema_file, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            if "cloned_test_voice" in d:
+                del d["cloned_test_voice"]
+                with open(schema_file, "w", encoding="utf-8") as f:
+                    json.dump(d, f, indent=2, ensure_ascii=False)
+        ref_file = voices.registry.REPO_ROOT / "voices" / "refs" / "cloned_test_voice.wav"
+        if ref_file.exists():
+            ref_file.unlink()
+        voices.registry.clear_registry_cache()
+
+
+def test_server_voices_sync_and_list_endpoints(
+    app_and_client: Tuple[Any, TestClient],
+) -> None:
+    """Verify POST /voices/sync and GET /voices endpoints on server app."""
+    _, client = app_and_client
+    headers = {"Authorization": "Bearer test-secret-token"}
+
+    # Sync
+    sync_res = client.post("/voices/sync", headers=headers)
+    assert sync_res.status_code == 200
+    sync_data = sync_res.json()
+    assert sync_data["status"] == "synced"
+    assert "narrator_english_neutral" in sync_data["voices"]
+
+    # List English voices
+    list_res = client.get("/voices?language=en")
+    assert list_res.status_code == 200
+    voices_en = list_res.json()["voices"]
+    assert "narrator_english_neutral" in voices_en
+
+
+def test_clone_voice_gpu_verification_failure_returns_500(
+    app_and_client: Tuple[Any, TestClient],
+) -> None:
+    """Verify POST /voices/clone raises 500 when synthesizer verification fails."""
+    app, client = app_and_client
+    headers = {"Authorization": "Bearer test-secret-token"}
+    audio_bytes = _create_test_audio_bytes(2.0)
+
+    with patch.object(
+        app.state.synthesizer, "synthesize", side_effect=RuntimeError("CUDA out of memory")
+    ):
+        res = client.post(
+            "/voices/clone",
+            data={
+                "voice_id": "cloned_oom_voice",
+                "language": "en",
+                "ref_text": "This is test transcript.",
+            },
+            files={"file": ("test.wav", audio_bytes, "audio/wav")},
+            headers=headers,
+        )
+        assert res.status_code == 500
+        assert "GPU verification failed: CUDA out of memory" in res.json()["detail"]
+        out_file = voices.registry.REPO_ROOT / "voices" / "refs" / "cloned_oom_voice.wav"
+        assert not out_file.exists()
+
