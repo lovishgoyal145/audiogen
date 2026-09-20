@@ -12,3 +12,9 @@ ema_pytorch>=0.5.2
 jieba
 librosa
 torchcodec>=0.1.0
+pypinyin
+transformers_stream_generator
+hydra-core>=1.3.0
+safetensors
+datasets
+tomli
