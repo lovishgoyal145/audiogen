@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
+from pathlib import Path
 import time
 from typing import Generator
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -20,6 +23,7 @@ def test_gateway() -> SessionGateway:
     return SessionGateway(
         poll_interval_seconds=0.01,
         startup_timeout_seconds=0.1,
+        registry_url=os.environ.get("TUNNEL_REGISTRY_WEBHOOK_URL", "https://mock-registry.example.com"),
     )
 
 
@@ -682,4 +686,267 @@ def test_gateway_clone_voice_normalizes_persisted_audio_to_24k_mono(
     finally:
         if target_path.exists():
             target_path.unlink()
+
+
+def test_heartbeat_endpoint_updates_timestamp_and_returns_ok(
+    client: TestClient,
+    test_gateway: SessionGateway,
+) -> None:
+    """Verify POST /session/heartbeat refreshes last_heartbeat and returns 200."""
+    initial_hb = test_gateway.last_heartbeat
+    resp = client.post("/session/heartbeat", json={"session_id": test_gateway.session_id})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "ok"
+    assert data["session_id"] == test_gateway.session_id
+    assert test_gateway.last_heartbeat >= initial_hb
+
+
+def test_terminate_endpoint_transitions_state_to_shutdown_and_rejects_requests(
+    client: TestClient,
+    test_gateway: SessionGateway,
+) -> None:
+    """Verify POST /session/terminate transitions state to SHUTDOWN and /generate returns 410."""
+    with patch.object(test_gateway, "_call_kaggle_push"), \
+         patch.object(test_gateway, "_call_get_kaggle_status", return_value="RUNNING"), \
+         patch.object(test_gateway, "_call_is_tunnel_healthy", return_value="https://test.trycloudflare.com"):
+        client.post("/session/start")
+        # Give background task time to set READY
+        for _ in range(50):
+            if test_gateway.state == "READY":
+                break
+            time.sleep(0.01)
+
+    assert test_gateway.state == "READY"
+
+    # Terminate session
+    term_resp = client.post(
+        "/session/terminate",
+        json={"session_id": test_gateway.session_id, "reason": "user_exit"},
+    )
+    assert term_resp.status_code == 200
+    assert term_resp.json()["status"] == "SHUTDOWN"
+    assert test_gateway.state == "SHUTDOWN"
+
+    # Subsequent /generate must return HTTP 410 Gone
+    gen_resp = client.post(
+        "/generate",
+        json={
+            "text": "Hello world",
+            "language": "en",
+            "speaker_ref_name": "narrator_english_neutral",
+        },
+    )
+    assert gen_resp.status_code == 410
+    assert gen_resp.json()["error"] == "session terminated"
+
+
+def test_terminate_endpoint_is_idempotent(
+    client: TestClient,
+    test_gateway: SessionGateway,
+) -> None:
+    """Verify multiple POST /session/terminate calls succeed safely."""
+    resp1 = client.post("/session/terminate", json={"reason": "tab_close"})
+    assert resp1.status_code == 200
+    assert resp1.json()["status"] == "SHUTDOWN"
+
+    resp2 = client.post("/session/terminate", json={"reason": "tab_close"})
+    assert resp2.status_code == 200
+    assert resp2.json()["status"] == "SHUTDOWN"
+
+
+# ==============================================================================
+# 4. TICKET-012 Regression Tests: Config, Pre-Flight, Discovery, & Stale Tabs
+# ==============================================================================
+
+
+def test_config_contract_webhook_url_env_resolution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify create_app resolves registry URL from webhook_url_env."""
+    cfg_file = tmp_path / "custom_config.yaml"
+    cfg_file.write_text(
+        "registry:\n"
+        "  webhook_url_env: 'CUSTOM_TUNNEL_URL'\n"
+        "  webhook_url: null\n"
+    )
+    monkeypatch.setenv("CUSTOM_TUNNEL_URL", "https://custom-tunnel.example.com")
+    custom_app = create_app(config_path=cfg_file)
+    gw: SessionGateway = custom_app.state.gateway
+    assert gw.registry_url == "https://custom-tunnel.example.com"
+
+
+def test_config_contract_webhook_url_fallback_resolution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify create_app falls back to webhook_url if env var is unset."""
+    cfg_file = tmp_path / "custom_config.yaml"
+    cfg_file.write_text(
+        "registry:\n"
+        "  webhook_url_env: 'NONEXISTENT_ENV_VAR'\n"
+        "  webhook_url: 'https://fallback-tunnel.example.com'\n"
+    )
+    monkeypatch.delenv("NONEXISTENT_ENV_VAR", raising=False)
+    custom_app = create_app(config_path=cfg_file)
+    gw: SessionGateway = custom_app.state.gateway
+    assert gw.registry_url == "https://fallback-tunnel.example.com"
+
+
+def test_preflight_validation_fails_fast_on_missing_registry_url() -> None:
+    """Verify start_session fails fast (< 50ms) without calling push if registry URL is missing."""
+    gw = SessionGateway(registry_url=None)
+    mock_push = MagicMock()
+    gw._push_fn = mock_push
+
+    start_time = time.time()
+    res = asyncio.run(gw.start_session())
+    elapsed = time.time() - start_time
+
+    assert elapsed < 0.05
+    assert res["status"] == "ERROR"
+    assert res["failure_stage"] == "local_configuration"
+    assert "Registry URL is not configured" in res["message"]
+    mock_push.assert_not_called()
+    assert gw.state == "ERROR"
+
+
+def test_preflight_validation_fails_fast_on_malformed_registry_url() -> None:
+    """Verify start_session fails fast on malformed registry URL."""
+    gw = SessionGateway(registry_url="ftp://invalid-scheme.example.com")
+    mock_push = MagicMock()
+    gw._push_fn = mock_push
+
+    res = asyncio.run(gw.start_session())
+    assert res["status"] == "ERROR"
+    assert res["failure_stage"] == "local_configuration"
+    assert "Invalid registry URL structure" in res["message"]
+    mock_push.assert_not_called()
+
+
+def test_preflight_validation_fails_fast_on_missing_auth_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify start_session fails fast when TUNNEL_REGISTRY_AUTH_TOKEN is missing."""
+    monkeypatch.delenv("TUNNEL_REGISTRY_AUTH_TOKEN", raising=False)
+    gw = SessionGateway(registry_url="https://mock-registry.example.com")
+    mock_push = MagicMock()
+    gw._push_fn = mock_push
+
+    res = asyncio.run(gw.start_session())
+    assert res["status"] == "ERROR"
+    assert res["failure_stage"] == "local_configuration"
+    assert "TUNNEL_REGISTRY_AUTH_TOKEN is missing" in res["message"]
+    mock_push.assert_not_called()
+
+
+def test_preflight_validation_fails_fast_on_missing_kaggle_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify start_session fails fast when Kaggle credentials are missing."""
+    monkeypatch.delenv("KAGGLE_USERNAME", raising=False)
+    monkeypatch.delenv("KAGGLE_KEY", raising=False)
+    with patch("pathlib.Path.is_file", return_value=False):
+        gw = SessionGateway(registry_url="https://mock-registry.example.com")
+        mock_push = MagicMock()
+        gw._push_fn = mock_push
+
+        res = asyncio.run(gw.start_session())
+        assert res["status"] == "ERROR"
+        assert res["failure_stage"] == "local_configuration"
+        assert "Kaggle credentials not found" in res["message"]
+        mock_push.assert_not_called()
+
+
+def test_polling_transitions_to_error_on_registry_auth_error(test_gateway: SessionGateway, client: TestClient) -> None:
+    """Verify polling loop transitions to ERROR when discovery reports REGISTRY_AUTH_ERROR."""
+    test_gateway.poll_interval_seconds = 0.01
+    test_gateway.startup_timeout_seconds = 5.0
+
+    mock_discovery = session_manager.TunnelDiscoveryResult(
+        status=session_manager.DiscoveryStatus.REGISTRY_AUTH_ERROR,
+        message="HTTP 401 Unauthorized",
+        http_status=401,
+    )
+
+    with patch.object(test_gateway, "_call_kaggle_push"), \
+         patch.object(test_gateway, "_call_get_kaggle_status", return_value="RUNNING"), \
+         patch.object(test_gateway, "_call_check_tunnel_discovery", return_value=mock_discovery):
+        resp = client.post("/session/start")
+        assert resp.status_code == 200
+
+        for _ in range(20):
+            time.sleep(0.01)
+            status_resp = client.get("/session/status")
+            if status_resp.json()["status"] == "ERROR":
+                break
+
+        data = client.get("/session/status").json()
+        assert data["status"] == "ERROR"
+        assert data["failure_stage"] == "registry_communication"
+        assert "Registry authentication failed" in data["message"]
+
+
+def test_polling_retries_on_no_tunnel_registered(test_gateway: SessionGateway, client: TestClient) -> None:
+    """Verify polling loop continues polling when NO_TUNNEL_REGISTERED is returned."""
+    test_gateway.poll_interval_seconds = 0.01
+    test_gateway.startup_timeout_seconds = 0.05
+
+    mock_no_tunnel = session_manager.TunnelDiscoveryResult(
+        status=session_manager.DiscoveryStatus.NO_TUNNEL_REGISTERED,
+        message="No tunnel registered yet.",
+    )
+
+    with patch.object(test_gateway, "_call_kaggle_push"), \
+         patch.object(test_gateway, "_call_get_kaggle_status", return_value="RUNNING"), \
+         patch.object(test_gateway, "_call_check_tunnel_discovery", return_value=mock_no_tunnel):
+        resp = client.post("/session/start")
+        assert resp.status_code == 200
+
+        # Wait until timeout
+        for _ in range(20):
+            time.sleep(0.01)
+            status_resp = client.get("/session/status")
+            if status_resp.json()["status"] == "ERROR":
+                break
+
+        data = client.get("/session/status").json()
+        assert data["status"] == "ERROR"
+        assert data["failure_stage"] == "timeout"
+        assert "timed out" in data["message"]
+
+
+def test_terminate_rejects_mismatched_session_id_when_ready(test_gateway: SessionGateway, client: TestClient) -> None:
+    """Verify POST /session/terminate with mismatched session_id returns 400 and preserves READY."""
+    test_gateway._state = "READY"
+    resp = client.post(
+        "/session/terminate",
+        json={"session_id": "stale-session-id-123", "reason": "stale_tab_close"},
+    )
+    assert resp.status_code == 400
+    assert "mismatched session_id" in resp.json()["message"]
+    assert test_gateway.state == "READY"
+
+
+def test_terminate_rejects_missing_session_id_when_ready(test_gateway: SessionGateway, client: TestClient) -> None:
+    """Verify POST /session/terminate with empty session_id returns 400 when session is active."""
+    test_gateway._state = "READY"
+    resp = client.post(
+        "/session/terminate",
+        json={"reason": "anonymous_request"},
+    )
+    assert resp.status_code == 400
+    assert "session_id is required" in resp.json()["message"]
+    assert test_gateway.state == "READY"
+
+
+def test_terminate_succeeds_with_matching_session_id(test_gateway: SessionGateway, client: TestClient) -> None:
+    """Verify POST /session/terminate with matching session_id succeeds and transitions to SHUTDOWN."""
+    test_gateway._state = "READY"
+    test_gateway._tunnel_url = "https://ready.trycloudflare.com"
+
+    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post, \
+         patch("orchestrator.session_manager.cancel_kaggle_kernel", return_value=True), \
+         patch("orchestrator.session_manager.delete_tunnel_url", return_value=True):
+        mock_post.return_value = MagicMock(status_code=200)
+        resp = client.post(
+            "/session/terminate",
+            json={"session_id": test_gateway.session_id, "reason": "user_exit"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "SHUTDOWN"
+        assert test_gateway.state == "SHUTDOWN"
+
+
 

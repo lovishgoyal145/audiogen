@@ -935,3 +935,30 @@ def test_clone_voice_gpu_verification_failure_returns_500(
         out_file = voices.registry.REPO_ROOT / "voices" / "refs" / "cloned_oom_voice.wav"
         assert not out_file.exists()
 
+
+def test_shutdown_unauthorized_returns_401(
+    app_and_client: Tuple[Any, TestClient],
+) -> None:
+    """Verify POST /shutdown without valid token returns 401."""
+    _, client = app_and_client
+    res = client.post("/shutdown")
+    assert res.status_code == 401
+    assert "Unauthorized" in res.json()["detail"]
+
+
+def test_shutdown_authorized_returns_200_and_initiates_exit(
+    app_and_client: Tuple[Any, TestClient],
+) -> None:
+    """Verify POST /shutdown with valid token returns 200 OK and dispatches exit."""
+    app, client = app_and_client
+    headers = {"Authorization": "Bearer test-secret-token"}
+    with patch("os._exit") as mock_exit, \
+         patch.object(app.state.watchdog, "_default_shutdown_action") as mock_watchdog_action:
+        res = client.post("/shutdown", headers=headers)
+        assert res.status_code == 200
+        assert res.json()["status"] == "shutting_down"
+        # Give delayed thread 0.6s to trigger action
+        time.sleep(0.7)
+        assert mock_watchdog_action.called or mock_exit.called
+
+

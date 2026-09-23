@@ -103,6 +103,11 @@
     }
     .status-dot.ready { background-color: var(--success); }
     .status-dot.error { background-color: var(--danger); }
+    .status-dot.terminating {
+      background-color: var(--warning);
+      animation: pulse 1.5s infinite;
+    }
+    .status-dot.shutdown { background-color: var(--muted); }
 
     @keyframes pulse {
       0%, 100% { opacity: 1; transform: scale(1); }
@@ -512,9 +517,12 @@
     <div class="card" id="session-card">
       <div class="card-title">
         <span>GPU Status</span>
-        <div class="status-badge">
-          <span class="status-dot idle" id="status-dot"></span>
-          <span id="status-label">Idle</span>
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <div class="status-badge">
+            <span class="status-dot idle" id="status-dot"></span>
+            <span id="status-label">Idle</span>
+          </div>
+          <button id="btn-stop-session" class="btn secondary" style="display: none; padding: 4px 10px; font-size: 0.75rem; color: #fca5a5; border-color: rgba(239, 68, 68, 0.4);">Stop & Exit</button>
         </div>
       </div>
       <div class="status-message" id="status-message">GPU session is idle. Click "Start Session" to wake the Kaggle worker.</div>
@@ -640,6 +648,9 @@
     // State machine variables
     let currentState = "IDLE";
     let pollIntervalId = null;
+    let heartbeatIntervalId = null;
+    let activeSessionId = null;
+    let isTerminating = false;
     let selectedLanguage = "en";
     let selectedVoice = "";
 
@@ -648,6 +659,7 @@
     const statusLabel = document.getElementById("status-label");
     const statusMessage = document.getElementById("status-message");
     const startBtn = document.getElementById("start-btn");
+    const btnStopSession = document.getElementById("btn-stop-session");
     const errorAlert = document.getElementById("error-alert");
 
     const synthesisCard = document.getElementById("synthesis-card");
@@ -700,8 +712,9 @@
       cloneAlert.textContent = message;
     }
 
-    function updateStateUI(state, message) {
+    function updateStateUI(state, message, sessionId) {
       currentState = state;
+      if (sessionId) activeSessionId = sessionId;
 
       // Update dot and label
       statusDot.className = "status-dot " + state.toLowerCase();
@@ -712,28 +725,112 @@
         startBtn.disabled = false;
         startBtn.textContent = "Start Session";
         startBtn.style.display = "inline-flex";
+        btnStopSession.style.display = "none";
         synthesisCard.style.display = "none";
+        stopHeartbeat();
       } else if (state === "STARTING") {
         statusMessage.textContent = message || "Starting… (this can take a minute or two)";
         startBtn.disabled = true;
         startBtn.textContent = "Starting...";
         startBtn.style.display = "inline-flex";
+        btnStopSession.style.display = "inline-flex";
         synthesisCard.style.display = "none";
+        startHeartbeat();
       } else if (state === "READY") {
         statusMessage.textContent = message || "GPU session is ready.";
         startBtn.disabled = true;
         startBtn.style.display = "none";
+        btnStopSession.style.display = "inline-flex";
         synthesisCard.style.display = "flex";
         stopPolling();
+        startHeartbeat();
         loadVoices(selectedLanguage);
+      } else if (state === "TERMINATING") {
+        statusMessage.textContent = message || "Session terminating...";
+        startBtn.disabled = true;
+        startBtn.textContent = "Terminating...";
+        startBtn.style.display = "inline-flex";
+        btnStopSession.style.display = "none";
+        synthesisCard.style.display = "none";
+        stopPolling();
+        stopHeartbeat();
+      } else if (state === "SHUTDOWN") {
+        statusMessage.textContent = message || "Session terminated. You may close this tab.";
+        startBtn.disabled = false;
+        startBtn.textContent = "Start New Session";
+        startBtn.style.display = "inline-flex";
+        btnStopSession.style.display = "none";
+        synthesisCard.style.display = "none";
+        stopPolling();
+        stopHeartbeat();
       } else if (state === "ERROR") {
         statusMessage.textContent = message || "An error occurred during session startup.";
         startBtn.disabled = false;
         startBtn.textContent = "Retry Session";
         startBtn.style.display = "inline-flex";
+        btnStopSession.style.display = "none";
         synthesisCard.style.display = "none";
         stopPolling();
+        stopHeartbeat();
       }
+    }
+
+    function startHeartbeat() {
+      if (heartbeatIntervalId !== null) return;
+      sendHeartbeat();
+      heartbeatIntervalId = setInterval(sendHeartbeat, 3000);
+    }
+
+    function stopHeartbeat() {
+      if (heartbeatIntervalId !== null) {
+        clearInterval(heartbeatIntervalId);
+        heartbeatIntervalId = null;
+      }
+    }
+
+    async function sendHeartbeat() {
+      if (isTerminating || (currentState !== "STARTING" && currentState !== "READY")) return;
+      try {
+        const resp = await fetch("/session/heartbeat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: activeSessionId })
+        });
+        if (resp.status === 400) {
+          console.warn("Heartbeat rejected with HTTP 400 (stale or mismatched session). Stopping heartbeat.");
+          stopHeartbeat();
+          activeSessionId = null;
+          fetchSessionStatus();
+        }
+      } catch (err) {
+        console.debug("Heartbeat error:", err);
+      }
+    }
+
+    function terminateSession(reason = "user_exit") {
+      if (isTerminating) return;
+      // Do not send stale/unbound terminate requests if session is already inactive
+      if (!activeSessionId && (currentState === "IDLE" || currentState === "SHUTDOWN" || currentState === "ERROR")) {
+        return;
+      }
+      isTerminating = true;
+      stopPolling();
+      stopHeartbeat();
+
+      const payload = JSON.stringify({ session_id: activeSessionId, reason: reason });
+      if (navigator.sendBeacon) {
+        const blob = new Blob([payload], { type: "application/json" });
+        navigator.sendBeacon("/session/terminate", blob);
+      } else {
+        fetch("/session/terminate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: payload,
+          keepalive: true,
+        }).catch(() => {});
+      }
+
+      updateStateUI("SHUTDOWN", "Session terminated. You may close this window.");
     }
 
     async function fetchSessionStatus() {
@@ -741,7 +838,8 @@
         const resp = await fetch("/session/status");
         if (!resp.ok) return;
         const data = await resp.json();
-        updateStateUI(data.status, data.message);
+        if (data.session_id) activeSessionId = data.session_id;
+        updateStateUI(data.status, data.message, data.session_id);
       } catch (err) {
         console.error("Error fetching session status:", err);
       }
@@ -762,6 +860,7 @@
     async function handleStartSession() {
       showError("");
       if (currentState === "STARTING") return;
+      isTerminating = false;
 
       startBtn.disabled = true;
       startBtn.textContent = "Starting...";
@@ -771,8 +870,10 @@
         const resp = await fetch("/session/start", { method: "POST" });
         const data = await resp.json();
         if (resp.ok) {
-          updateStateUI(data.status, data.message);
+          if (data.session_id) activeSessionId = data.session_id;
+          updateStateUI(data.status, data.message, data.session_id);
           startPolling();
+          startHeartbeat();
         } else {
           showError(data.detail || data.message || "Failed to start session.");
           updateStateUI("ERROR", data.message || "Start failed");
@@ -1083,6 +1184,20 @@
 
     // Event Listeners
     startBtn.addEventListener("click", handleStartSession);
+
+    btnStopSession.addEventListener("click", () => {
+      if (confirm("Are you sure you want to stop and exit this AudioGen session? All remote GPU resources will be released immediately.")) {
+        terminateSession("user_button_exit");
+      }
+    });
+
+    window.addEventListener("pagehide", () => {
+      terminateSession("pagehide");
+    });
+
+    window.addEventListener("beforeunload", () => {
+      terminateSession("beforeunload");
+    });
 
     scriptInput.addEventListener("input", () => {
       charCounter.textContent = `${scriptInput.value.length} chars`;

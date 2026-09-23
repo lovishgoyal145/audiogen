@@ -13,6 +13,7 @@ import re
 import secrets
 import sys
 import tempfile
+import threading
 import time
 from typing import Any, AsyncGenerator, Dict, Final, List, Optional, Tuple, Union
 import numpy as np
@@ -523,6 +524,44 @@ def create_app(
         else:
             voice_list = voices.registry.list_voices()
         return JSONResponse(status_code=status.HTTP_200_OK, content={"voices": voice_list})
+
+    @app.post(
+        "/shutdown",
+        status_code=status.HTTP_200_OK,
+        responses={
+            200: {"description": "Server shutdown initiated"},
+            401: {"model": ErrorResponse},
+        },
+    )
+    async def shutdown(
+        request: Request,
+        _token: str = Depends(verify_bearer_token),
+    ) -> JSONResponse:
+        """Protected endpoint triggering immediate server and kernel termination."""
+        logger.info("Authenticated shutdown requested via /shutdown.")
+
+        def _delayed_exit():
+            time.sleep(0.5)
+            active_watchdog = getattr(app.state, "watchdog", None)
+            if active_watchdog is not None:
+                try:
+                    active_watchdog._default_shutdown_action()
+                    return
+                except Exception:
+                    pass
+            try:
+                sys.stdout.flush()
+                sys.stderr.flush()
+            except Exception:
+                pass
+            os._exit(0)
+
+        threading.Thread(target=_delayed_exit, daemon=True, name="RemoteShutdownThread").start()
+
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={"status": "shutting_down", "message": "Server shutdown initiated."},
+        )
 
     return app
 
