@@ -12,12 +12,86 @@ import json
 import logging
 import os
 from pathlib import Path
+import random
 import re
 import shutil
+import socket
+import struct
 import subprocess
+from dataclasses import dataclass
+from enum import Enum
 from typing import Final, List, Optional, Union
 from urllib.parse import urlparse, urlunparse
 import httpx
+
+# Install DNS fallback for *.trycloudflare.com if local resolver fails (e.g. ISP DNS blocking)
+_orig_getaddrinfo = socket.getaddrinfo
+
+
+def _query_dns_fallback(
+    hostname: str, dns_servers=("1.1.1.1", "8.8.8.8"), timeout: float = 2.0
+) -> List[str]:
+    query_id = random.randint(0, 65535)
+    header = struct.pack("!HHHHHH", query_id, 0x0100, 1, 0, 0, 0)
+    qname = (
+        b"".join(bytes([len(p)]) + p.encode("ascii") for p in hostname.split("."))
+        + b"\x00"
+    )
+    question = qname + struct.pack("!HH", 1, 1)
+    packet = header + question
+
+    for server in dns_servers:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(timeout)
+        try:
+            sock.sendto(packet, (server, 53))
+            data, _ = sock.recvfrom(1024)
+        except Exception:
+            continue
+        finally:
+            sock.close()
+
+        offset = 12 + len(question)
+        answers: List[str] = []
+        while offset < len(data):
+            if data[offset] >= 192:
+                offset += 2
+            else:
+                while data[offset] != 0:
+                    offset += 1 + data[offset]
+                offset += 1
+            if offset + 10 > len(data):
+                break
+            atype, aclass, ttl, rdlength = struct.unpack("!HHIH", data[offset:offset+10])
+            offset += 10
+            if atype == 1 and rdlength == 4:
+                answers.append(socket.inet_ntoa(data[offset:offset+4]))
+            offset += rdlength
+        if answers:
+            return answers
+    return []
+
+
+def _custom_getaddrinfo(host, port, *args, **kwargs):
+    try:
+        return _orig_getaddrinfo(host, port, *args, **kwargs)
+    except socket.gaierror as err:
+        h_str = (
+            host.decode("ascii", errors="ignore")
+            if isinstance(host, bytes)
+            else str(host or "")
+        )
+        if h_str.endswith(".trycloudflare.com"):
+            ips = _query_dns_fallback(h_str)
+            if ips:
+                target_ip = (
+                    ips[0].encode("ascii") if isinstance(host, bytes) else ips[0]
+                )
+                return _orig_getaddrinfo(target_ip, port, *args, **kwargs)
+        raise err
+
+
+socket.getaddrinfo = _custom_getaddrinfo
 
 try:
     from scripts.sync_secrets_dataset import sync_secrets_dataset
@@ -105,16 +179,6 @@ def _kaggle_push(
     created_temp_meta = False
 
     try:
-        if not meta_path.exists():
-            config_meta = REPO_ROOT / "config" / "kernel-metadata.json"
-            if config_meta.exists():
-                try:
-                    meta_path.symlink_to(config_meta.resolve())
-                    created_temp_meta = True
-                except OSError:
-                    shutil.copy2(config_meta, meta_path)
-                    created_temp_meta = True
-
         # Check sync_secrets_dataset availability
         if sync_secrets_dataset is None:
             raise KagglePushError(
@@ -123,10 +187,43 @@ def _kaggle_push(
 
         # Ensure private Kaggle secret dataset is synced before pushing kernel
         try:
-            sync_secrets_dataset(kaggle_cmd=kaggle_cmd)
+            dataset_slug = sync_secrets_dataset(kaggle_cmd=kaggle_cmd)
         except Exception as exc:
             logger.error("Failed to synchronize Kaggle secrets dataset: %s", exc)
             raise KagglePushError(f"Secret dataset sync failed prior to push: {exc}") from exc
+
+        resolved_slug = _resolve_kernel_slug(kernel_slug)
+        meta_data = {
+            "id": resolved_slug,
+            "title": "audiogen",
+            "code_file": "interactive_notebook.ipynb",
+            "language": "python",
+            "kernel_type": "notebook",
+            "is_private": True,
+            "enable_gpu": True,
+            "enable_internet": True,
+            "dataset_sources": [dataset_slug] if dataset_slug else [],
+            "competition_sources": [],
+            "kernel_sources": [],
+        }
+        config_meta = REPO_ROOT / "config" / "kernel-metadata.json"
+        if config_meta.exists():
+            try:
+                with open(config_meta, "r", encoding="utf-8") as f:
+                    tpl = json.load(f)
+                if isinstance(tpl, dict):
+                    meta_data.update(tpl)
+                    meta_data["id"] = resolved_slug
+                    if dataset_slug:
+                        cur_sources = list(meta_data.get("dataset_sources", []))
+                        if dataset_slug not in cur_sources:
+                            cur_sources.append(dataset_slug)
+                        meta_data["dataset_sources"] = cur_sources
+            except Exception as exc:
+                logger.warning("Could not read template kernel-metadata.json: %s", exc)
+
+        meta_path.write_text(json.dumps(meta_data, indent=2), encoding="utf-8")
+        created_temp_meta = True
 
         push_cmd = [*cmd_base, "kernels", "push", "-p", str(target_dir)]
         logger.info("Running Kaggle push command: %s", " ".join(push_cmd))
@@ -218,15 +315,12 @@ def get_kaggle_status(
 
 def parse_kaggle_status_output(output: str) -> str:
     """Extract and normalize status from Kaggle CLI stdout."""
-    # Pattern: '<kernel> has status "running"', "<kernel> has status 'error'",
-    # or '<kernel> has status "KernelWorkerStatus.ERROR"'
     match = re.search(r'has\s+status\s+["\']?([a-zA-Z0-9_\.\-]+)["\']?', output, re.IGNORECASE)
     if match:
         raw_status = match.group(1).strip().strip('"').strip("'").upper().strip(".")
         normalized = raw_status.rsplit(".", 1)[-1].strip()
         return normalized or "UNKNOWN"
 
-    # Fallback to direct status keywords if stdout does not follow the standard phrasing
     output_upper = output.upper()
     known_statuses = [
         "RUNNING",
@@ -243,7 +337,6 @@ def parse_kaggle_status_output(output: str) -> str:
         if re.search(rf"(?:\b|\.){re.escape(status)}\b", output_upper):
             return status
 
-    # Fallback to cleaned output
     first_line = output.splitlines()[0] if output else ""
     cleaned = first_line.strip().strip('"').strip("'").upper().strip(".")
     if cleaned:
@@ -253,14 +346,7 @@ def parse_kaggle_status_output(output: str) -> str:
 
 
 def resolve_read_endpoint(endpoint_url: str) -> str:
-    """Normalize registry read endpoint to explicit /get/tunnel_url path for Upstash Redis REST.
-
-    Supports:
-    - Base URL: https://<id>.upstash.io -> https://<id>.upstash.io/get/tunnel_url
-    - Write key path: https://<id>.upstash.io/set/tunnel_url -> https://<id>.upstash.io/get/tunnel_url
-    - Read key path: https://<id>.upstash.io/get/tunnel_url -> https://<id>.upstash.io/get/tunnel_url
-    - Generic URL with no path -> appends /get/tunnel_url
-    """
+    """Normalize registry read endpoint to explicit /get/tunnel_url path for Upstash Redis REST."""
     clean = endpoint_url.strip().rstrip("/")
     parsed = urlparse(clean)
     path = parsed.path.rstrip("/")
@@ -275,17 +361,7 @@ def resolve_read_endpoint(endpoint_url: str) -> str:
 
 
 def extract_tunnel_url_from_response(resp: httpx.Response) -> Optional[str]:
-    """Extract tunnel URL from Upstash {"result": ...}, raw JSON, or plain text.
-
-    Upstash Redis REST returns:
-    - {"result": "{\"tunnel_url\": \"https://...\", \"secret\": \"...\"}"} (JSON string in result)
-    - {"result": "https://..."} (URL string in result)
-    - {"result": {"tunnel_url": "https://..."}} (nested dict in result)
-    - {"result": null} (key not found)
-    Or direct webhooks returning:
-    - {"tunnel_url": "https://...", ...} or {"url": "https://..."}
-    - "https://..."
-    """
+    """Extract tunnel URL from Upstash {"result": ...}, raw JSON, or plain text."""
     try:
         data = resp.json()
     except Exception:
@@ -339,62 +415,124 @@ def extract_tunnel_url_from_response(resp: httpx.Response) -> Optional[str]:
     return None
 
 
-def is_tunnel_healthy(
+class DiscoveryStatus(str, Enum):
+    CONFIGURATION_ERROR = "CONFIGURATION_ERROR"
+    REGISTRY_UNREACHABLE = "REGISTRY_UNREACHABLE"
+    REGISTRY_AUTH_ERROR = "REGISTRY_AUTH_ERROR"
+    NO_TUNNEL_REGISTERED = "NO_TUNNEL_REGISTERED"
+    TUNNEL_UNHEALTHY = "TUNNEL_UNHEALTHY"
+    READY = "READY"
+
+
+@dataclass
+class TunnelDiscoveryResult:
+    status: DiscoveryStatus
+    tunnel_url: Optional[str] = None
+    message: str = ""
+    http_status: Optional[int] = None
+    error: Optional[str] = None
+
+
+def check_tunnel_discovery(
     registry_url: Optional[str] = None,
     health_timeout: float = 3.0,
     client: Optional[httpx.Client] = None,
-) -> Optional[str]:
-    """Check registry/KV for a published tunnel URL and verify its /health endpoint.
+) -> TunnelDiscoveryResult:
+    """Perform structured tunnel discovery against registry/KV and verify tunnel /health.
 
-    Returns the valid tunnel URL if healthy, None otherwise.
-    Never treats registry presence alone as readiness.
-
-    Args:
-        registry_url: Webhook or KV registry endpoint URL.
-                      Defaults to TUNNEL_REGISTRY_WEBHOOK_URL env var.
-        health_timeout: Timeout in seconds for HTTP requests.
-        client: Optional injected httpx.Client for testing.
-
-    Returns:
-        Healthy tunnel URL string (e.g. 'https://xyz.trycloudflare.com') or None.
+    Distinguishes:
+    - CONFIGURATION_ERROR: Missing/invalid registry URL.
+    - REGISTRY_UNREACHABLE: Network or connection error contacting registry.
+    - REGISTRY_AUTH_ERROR: 401 or 403 HTTP response from registry.
+    - NO_TUNNEL_REGISTERED: Registry reachable, but tunnel URL key is null/empty.
+    - TUNNEL_UNHEALTHY: Tunnel URL discovered, but GET /health returned non-200 or timed out.
+    - READY: Tunnel URL discovered and GET /health returned HTTP 200.
     """
     target = registry_url or os.environ.get(ENV_REGISTRY_WEBHOOK_URL)
     if not target or not str(target).strip():
-        logger.debug("No registry URL configured for tunnel health check.")
-        return None
+        logger.debug("No registry URL configured for tunnel discovery.")
+        return TunnelDiscoveryResult(
+            status=DiscoveryStatus.CONFIGURATION_ERROR,
+            message="No registry URL configured.",
+            error="Missing registry URL",
+        )
 
-    target = resolve_read_endpoint(str(target).strip())
+    target_clean = str(target).strip().rstrip("/")
+    parsed = urlparse(target_clean)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        logger.warning("Invalid registry URL structure: %s", target_clean)
+        return TunnelDiscoveryResult(
+            status=DiscoveryStatus.CONFIGURATION_ERROR,
+            message=f"Invalid registry URL structure: '{target_clean}'",
+            error=f"Invalid registry URL structure: '{target_clean}'",
+        )
 
+    read_target = resolve_read_endpoint(target_clean)
     auth_token = os.environ.get(ENV_REGISTRY_AUTH_TOKEN)
-    headers = {"Authorization": f"Bearer {auth_token.strip()}"} if auth_token and auth_token.strip() else None
+    headers = (
+        {"Authorization": f"Bearer {auth_token.strip()}"}
+        if auth_token and auth_token.strip()
+        else None
+    )
 
     # Step 1: Query registry for tunnel URL
-    tunnel_url: Optional[str] = None
     try:
         if client is not None:
             if headers:
-                resp = client.get(target, timeout=health_timeout, headers=headers)
+                resp = client.get(read_target, timeout=health_timeout, headers=headers)
             else:
-                resp = client.get(target, timeout=health_timeout)
+                resp = client.get(read_target, timeout=health_timeout)
         else:
             with httpx.Client(timeout=health_timeout) as default_client:
                 if headers:
-                    resp = default_client.get(target, headers=headers)
+                    resp = default_client.get(read_target, headers=headers)
                 else:
-                    resp = default_client.get(target)
+                    resp = default_client.get(read_target)
+
+        if resp.status_code in (401, 403):
+            logger.error(
+                "Registry authentication failed with HTTP %d for %s",
+                resp.status_code,
+                read_target,
+            )
+            return TunnelDiscoveryResult(
+                status=DiscoveryStatus.REGISTRY_AUTH_ERROR,
+                message=f"Registry authentication failed with HTTP {resp.status_code}",
+                http_status=resp.status_code,
+                error=resp.text.strip(),
+            )
 
         if resp.status_code != 200:
-            logger.debug("Registry returned HTTP %d for %s", resp.status_code, target)
-            return None
+            logger.warning(
+                "Registry returned HTTP %d for %s", resp.status_code, read_target
+            )
+            return TunnelDiscoveryResult(
+                status=DiscoveryStatus.REGISTRY_UNREACHABLE,
+                message=f"Registry returned HTTP {resp.status_code}",
+                http_status=resp.status_code,
+                error=resp.text.strip(),
+            )
 
         tunnel_url = extract_tunnel_url_from_response(resp)
     except Exception as exc:
-        logger.debug("Failed to query registry at %s: %s", target, exc)
-        return None
+        logger.warning("Failed to connect to registry at %s: %s", read_target, exc)
+        return TunnelDiscoveryResult(
+            status=DiscoveryStatus.REGISTRY_UNREACHABLE,
+            message=f"Failed to connect to registry at {read_target}: {exc}",
+            error=str(exc),
+        )
 
-    if not tunnel_url or not (tunnel_url.startswith("http://") or tunnel_url.startswith("https://")):
-        logger.debug("No valid tunnel URL found in registry response.")
-        return None
+    if not tunnel_url or not (
+        tunnel_url.startswith("http://") or tunnel_url.startswith("https://")
+    ):
+        logger.info(
+            "Registry reachable; worker still initializing (no tunnel registered yet)."
+        )
+        return TunnelDiscoveryResult(
+            status=DiscoveryStatus.NO_TUNNEL_REGISTERED,
+            message="No tunnel registered in registry yet.",
+            http_status=200,
+        )
 
     # Step 2: Validate with real GET /health against the tunnel URL
     health_endpoint = f"{tunnel_url.rstrip('/')}/health"
@@ -406,33 +544,178 @@ def is_tunnel_healthy(
                 health_resp = default_client.get(health_endpoint)
 
         if health_resp.status_code == 200:
-            logger.info("Tunnel at %s is healthy and ready.", tunnel_url)
-            return tunnel_url.rstrip('/')
+            logger.info("Tunnel at %s is healthy and ready (HTTP 200).", tunnel_url)
+            return TunnelDiscoveryResult(
+                status=DiscoveryStatus.READY,
+                tunnel_url=tunnel_url.rstrip("/"),
+                message=f"Tunnel at {tunnel_url.rstrip('/')} is healthy and ready.",
+                http_status=200,
+            )
 
-        logger.debug(
-            "Tunnel health check at %s returned status %d",
-            health_endpoint,
+        logger.info(
+            "Tunnel URL discovered (%s); awaiting healthy /health response (current status: %d)...",
+            tunnel_url,
             health_resp.status_code,
         )
-        return None
+        return TunnelDiscoveryResult(
+            status=DiscoveryStatus.TUNNEL_UNHEALTHY,
+            tunnel_url=tunnel_url.rstrip("/"),
+            message=f"Tunnel /health returned status {health_resp.status_code}",
+            http_status=health_resp.status_code,
+            error=health_resp.text.strip(),
+        )
     except Exception as exc:
-        logger.debug("Tunnel health check failed for %s: %s", health_endpoint, exc)
-        return None
+        logger.info(
+            "Tunnel URL discovered (%s); awaiting healthy /health response (probe failed: %s)...",
+            tunnel_url,
+            exc,
+        )
+        return TunnelDiscoveryResult(
+            status=DiscoveryStatus.TUNNEL_UNHEALTHY,
+            tunnel_url=tunnel_url.rstrip("/"),
+            message=f"Tunnel probe failed: {exc}",
+            error=str(exc),
+        )
 
 
-# Backward-compatible alias
+def is_tunnel_healthy(
+    registry_url: Optional[str] = None,
+    health_timeout: float = 3.0,
+    client: Optional[httpx.Client] = None,
+) -> Optional[str]:
+    """Check registry/KV for a published tunnel URL and verify its /health endpoint.
+
+    Backward-compatible wrapper delegating to check_tunnel_discovery.
+    Returns the valid tunnel URL if healthy, None otherwise.
+    Never treats registry presence alone as readiness.
+    """
+    result = check_tunnel_discovery(
+        registry_url=registry_url,
+        health_timeout=health_timeout,
+        client=client,
+    )
+    if result.status == DiscoveryStatus.READY:
+        return result.tunnel_url
+    return None
+
+
+def cancel_kaggle_kernel(
+    kernel_slug: Optional[str] = None,
+    kaggle_cmd: Optional[List[str]] = None,
+    kernel_session_id: Optional[Union[str, int]] = None,
+    timeout_seconds: float = 5.0,
+) -> bool:
+    slug = _resolve_kernel_slug(kernel_slug)
+    logger.info("Attempting outside-in cancellation of Kaggle kernel '%s'...", slug)
+
+    if kernel_session_id is None:
+        logger.info(
+            "No active kernel_session_id provided for kernel '%s'. "
+            "get_kernel().metadata.id does not provide an active execution session ID. "
+            "Outside-in cancellation skipped; remote IdleWatchdog will reclaim resources.",
+            slug,
+        )
+        return False
+
+    try:
+        import kagglesdk
+        from kagglesdk.kernels.services.kernels_api_service import ApiCancelKernelSessionRequest
+
+        client = kagglesdk.KaggleClient()
+        req_cancel = ApiCancelKernelSessionRequest()
+        req_cancel.kernel_session_id = int(kernel_session_id)
+        client.kernels.kernels_api_client.cancel_kernel_session(req_cancel)
+        logger.info("Kaggle kernel session %s cancelled via kagglesdk.", kernel_session_id)
+        return True
+    except Exception as exc:
+        logger.warning("kagglesdk cancel_kernel_session failed: %s", exc)
+
+    return False
+
+
+def resolve_delete_endpoint(endpoint_url: str) -> str:
+    clean = endpoint_url.strip().rstrip("/")
+    parsed = urlparse(clean)
+    path = parsed.path.rstrip("/")
+    if path.endswith("/get/tunnel_url"):
+        new_path = path[:-len("/get/tunnel_url")] + "/del/tunnel_url"
+        return urlunparse(parsed._replace(path=new_path))
+    if path.endswith("/set/tunnel_url"):
+        new_path = path[:-len("/set/tunnel_url")] + "/del/tunnel_url"
+        return urlunparse(parsed._replace(path=new_path))
+    if path.endswith("/del/tunnel_url"):
+        return clean
+    if "upstash.io" in parsed.netloc.lower() or not path:
+        return f"{clean}/del/tunnel_url"
+    return clean
+
+
+def delete_tunnel_url(
+    endpoint_url: Optional[str] = None,
+    auth_token: Optional[str] = None,
+    timeout_seconds: float = 5.0,
+    client: Optional[httpx.Client] = None,
+) -> bool:
+    target = (
+        endpoint_url
+        or os.environ.get(ENV_REGISTRY_WEBHOOK_URL)
+        or DEFAULT_REGISTRY_URL
+    )
+    if not target or not str(target).strip():
+        logger.warning("No registry URL provided for delete_tunnel_url.")
+        return False
+    token = auth_token or os.environ.get(ENV_REGISTRY_AUTH_TOKEN)
+    headers = (
+        {"Authorization": f"Bearer {token.strip()}"}
+        if token and token.strip()
+        else {}
+    )
+    del_url = resolve_delete_endpoint(str(target).strip())
+    try:
+        if client is not None:
+            resp = client.post(del_url, headers=headers, timeout=timeout_seconds)
+            if resp.status_code not in (200, 204):
+                resp = client.get(del_url, headers=headers, timeout=timeout_seconds)
+        else:
+            with httpx.Client(timeout=timeout_seconds) as default_client:
+                resp = default_client.post(del_url, headers=headers)
+                if resp.status_code not in (200, 204):
+                    resp = default_client.get(del_url, headers=headers)
+        if resp.status_code in (200, 204):
+            logger.info("Successfully deleted tunnel URL from registry at %s", del_url)
+            return True
+        logger.warning(
+            "Registry returned HTTP %d on tunnel deletion: %s",
+            resp.status_code,
+            resp.text,
+        )
+        return False
+    except Exception as exc:
+        logger.warning("Failed to delete tunnel URL from registry (%s): %s", del_url, exc)
+        return False
+
+
+DEFAULT_REGISTRY_URL: Final[str] = "https://large-pup-282364.upstash.io"
 kaggle_push = _kaggle_push
 
 __all__ = [
     "ENV_REGISTRY_AUTH_TOKEN",
+    "ENV_REGISTRY_WEBHOOK_URL",
+    "DEFAULT_REGISTRY_URL",
     "TERMINAL_FAILURE_STATUSES",
+    "DiscoveryStatus",
+    "TunnelDiscoveryResult",
     "KagglePushError",
     "KaggleStatusError",
     "_kaggle_push",
     "kaggle_push",
     "get_kaggle_status",
     "parse_kaggle_status_output",
+    "check_tunnel_discovery",
     "is_tunnel_healthy",
     "resolve_read_endpoint",
+    "resolve_delete_endpoint",
+    "delete_tunnel_url",
+    "cancel_kaggle_kernel",
     "extract_tunnel_url_from_response",
 ]

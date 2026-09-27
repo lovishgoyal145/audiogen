@@ -16,12 +16,18 @@ from orchestrator.session_manager import (
     DEFAULT_STAGE_DIR,
     REPO_ROOT,
     TERMINAL_FAILURE_STATUSES,
+    DiscoveryStatus,
+    TunnelDiscoveryResult,
     KagglePushError,
     KaggleStatusError,
     _kaggle_push,
+    cancel_kaggle_kernel,
+    check_tunnel_discovery,
+    delete_tunnel_url,
     get_kaggle_status,
     is_tunnel_healthy,
     parse_kaggle_status_output,
+    resolve_delete_endpoint,
 )
 
 
@@ -66,6 +72,36 @@ def test_kaggle_push_success(tmp_path: Path) -> None:
         cmd = mock_run.call_args[0][0]
         assert cmd[:4] == ["kaggle", "kernels", "push", "-p"]
         assert cmd[4] == str(stage_dir)
+
+
+def test_kaggle_push_always_overwrites_stale_metadata(tmp_path: Path) -> None:
+    """Verify _kaggle_push overwrites any existing/stale kernel-metadata.json in stage directory."""
+    stage_dir = tmp_path / "stage"
+    stage_dir.mkdir()
+    stale_meta = stage_dir / "kernel-metadata.json"
+    stale_meta.write_text('{"id": "stale/slug", "dataset_sources": ["stale/dataset"]}', encoding="utf-8")
+
+    captured_content = {}
+
+    def mock_subprocess_run(cmd, *args, **kwargs):
+        # Read the file as it exists when kaggle CLI is called
+        meta_file = stage_dir / "kernel-metadata.json"
+        if meta_file.exists():
+            captured_content["data"] = json.loads(meta_file.read_text(encoding="utf-8"))
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="Pushed.", stderr="")
+
+    with patch("shutil.which", return_value="/usr/local/bin/kaggle"), \
+         patch("orchestrator.session_manager.sync_secrets_dataset", return_value="avidok/fresh-secrets"), \
+         patch("subprocess.run", side_effect=mock_subprocess_run):
+
+        _kaggle_push(stage_dir=stage_dir, kernel_slug="avidok/fresh-kernel")
+
+        assert "data" in captured_content
+        assert captured_content["data"]["id"] == "avidok/fresh-kernel"
+        assert "avidok/fresh-secrets" in captured_content["data"]["dataset_sources"]
+        assert "stale/dataset" not in captured_content["data"]["dataset_sources"]
+        # Ensure cleanup unlinked the file
+        assert not stale_meta.exists()
 
 
 def test_default_stage_dir_points_to_server() -> None:
@@ -701,4 +737,215 @@ def test_interactive_notebook_has_no_hardcoded_secrets() -> None:
     # Verify that tokens and URLs are retrieved dynamically from os.environ
     assert 'os.environ.get("SERVER_BEARER_TOKEN")' in all_code
     assert 'os.environ.get("TUNNEL_REGISTRY_WEBHOOK_URL")' in all_code
+
+
+def test_check_tunnel_discovery_missing_registry_url() -> None:
+    """Verify check_tunnel_discovery returns CONFIGURATION_ERROR when no registry URL."""
+    with patch.dict(os.environ, {}, clear=True):
+        res = check_tunnel_discovery(registry_url=None)
+        assert res.status == DiscoveryStatus.CONFIGURATION_ERROR
+        assert "registry URL" in res.message.lower() or "registry url" in (res.error or "").lower()
+
+
+def test_check_tunnel_discovery_invalid_url_structure() -> None:
+    """Verify check_tunnel_discovery returns CONFIGURATION_ERROR on invalid URL."""
+    res = check_tunnel_discovery(registry_url="not-a-valid-url")
+    assert res.status == DiscoveryStatus.CONFIGURATION_ERROR
+    assert "Invalid registry URL structure" in res.message
+
+
+def test_check_tunnel_discovery_registry_auth_error_401() -> None:
+    """Verify check_tunnel_discovery returns REGISTRY_AUTH_ERROR on HTTP 401."""
+    client = MagicMock(spec=httpx.Client)
+    resp = MagicMock(spec=httpx.Response)
+    resp.status_code = 401
+    resp.text = "Unauthorized"
+    client.get.return_value = resp
+
+    res = check_tunnel_discovery(registry_url="https://reg.example.com", client=client)
+    assert res.status == DiscoveryStatus.REGISTRY_AUTH_ERROR
+    assert res.http_status == 401
+
+
+def test_check_tunnel_discovery_registry_auth_error_403() -> None:
+    """Verify check_tunnel_discovery returns REGISTRY_AUTH_ERROR on HTTP 403."""
+    client = MagicMock(spec=httpx.Client)
+    resp = MagicMock(spec=httpx.Response)
+    resp.status_code = 403
+    resp.text = "Forbidden"
+    client.get.return_value = resp
+
+    res = check_tunnel_discovery(registry_url="https://reg.example.com", client=client)
+    assert res.status == DiscoveryStatus.REGISTRY_AUTH_ERROR
+    assert res.http_status == 403
+
+
+def test_check_tunnel_discovery_registry_unreachable() -> None:
+    """Verify check_tunnel_discovery returns REGISTRY_UNREACHABLE on connection error or 500."""
+    client = MagicMock(spec=httpx.Client)
+    client.get.side_effect = httpx.ConnectError("Network down")
+
+    res = check_tunnel_discovery(registry_url="https://reg.example.com", client=client)
+    assert res.status == DiscoveryStatus.REGISTRY_UNREACHABLE
+
+
+def test_check_tunnel_discovery_no_tunnel_registered() -> None:
+    """Verify check_tunnel_discovery returns NO_TUNNEL_REGISTERED when key is empty."""
+    client = MagicMock(spec=httpx.Client)
+    resp = MagicMock(spec=httpx.Response)
+    resp.status_code = 200
+    resp.json.return_value = {"result": None}
+    client.get.return_value = resp
+
+    res = check_tunnel_discovery(registry_url="https://reg.example.com", client=client)
+    assert res.status == DiscoveryStatus.NO_TUNNEL_REGISTERED
+
+
+def test_check_tunnel_discovery_tunnel_unhealthy_non_200() -> None:
+    """Verify check_tunnel_discovery returns TUNNEL_UNHEALTHY when /health returns non-200."""
+    client = MagicMock(spec=httpx.Client)
+
+    def mock_get(url: str, **kwargs):
+        resp = MagicMock(spec=httpx.Response)
+        if "reg.example.com" in url:
+            resp.status_code = 200
+            resp.json.return_value = {"tunnel_url": "https://test.trycloudflare.com"}
+            return resp
+        elif "health" in url:
+            resp.status_code = 503
+            resp.text = "Starting up"
+            return resp
+        raise ValueError(url)
+
+    client.get.side_effect = mock_get
+    res = check_tunnel_discovery(registry_url="https://reg.example.com", client=client)
+    assert res.status == DiscoveryStatus.TUNNEL_UNHEALTHY
+    assert res.tunnel_url == "https://test.trycloudflare.com"
+    assert res.http_status == 503
+
+
+def test_check_tunnel_discovery_tunnel_unhealthy_timeout() -> None:
+    """Verify check_tunnel_discovery returns TUNNEL_UNHEALTHY when /health times out."""
+    client = MagicMock(spec=httpx.Client)
+
+    def mock_get(url: str, **kwargs):
+        if "reg.example.com" in url:
+            resp = MagicMock(spec=httpx.Response)
+            resp.status_code = 200
+            resp.json.return_value = {"tunnel_url": "https://test.trycloudflare.com"}
+            return resp
+        elif "health" in url:
+            raise httpx.TimeoutException("Health timeout")
+        raise ValueError(url)
+
+    client.get.side_effect = mock_get
+    res = check_tunnel_discovery(registry_url="https://reg.example.com", client=client)
+    assert res.status == DiscoveryStatus.TUNNEL_UNHEALTHY
+    assert res.tunnel_url == "https://test.trycloudflare.com"
+
+
+def test_check_tunnel_discovery_ready() -> None:
+    """Verify check_tunnel_discovery returns READY when registry and /health succeed."""
+    client = MagicMock(spec=httpx.Client)
+
+    def mock_get(url: str, **kwargs):
+        resp = MagicMock(spec=httpx.Response)
+        if "reg.example.com" in url:
+            resp.status_code = 200
+            resp.json.return_value = {"tunnel_url": "https://test.trycloudflare.com"}
+            return resp
+        elif "health" in url:
+            resp.status_code = 200
+            return resp
+        raise ValueError(url)
+
+    client.get.side_effect = mock_get
+    res = check_tunnel_discovery(registry_url="https://reg.example.com", client=client)
+    assert res.status == DiscoveryStatus.READY
+    assert res.tunnel_url == "https://test.trycloudflare.com"
+
+
+def test_resolve_delete_endpoint() -> None:
+    """Verify resolve_delete_endpoint handles base URLs and path variations correctly."""
+    from orchestrator.session_manager import resolve_delete_endpoint
+
+    assert resolve_delete_endpoint("https://my-kv.upstash.io") == "https://my-kv.upstash.io/del/tunnel_url"
+    assert resolve_delete_endpoint("https://my-kv.upstash.io/") == "https://my-kv.upstash.io/del/tunnel_url"
+    assert resolve_delete_endpoint("https://my-kv.upstash.io/set/tunnel_url") == "https://my-kv.upstash.io/del/tunnel_url"
+    assert resolve_delete_endpoint("https://my-kv.upstash.io/get/tunnel_url") == "https://my-kv.upstash.io/del/tunnel_url"
+    assert resolve_delete_endpoint("https://my-kv.upstash.io/del/tunnel_url") == "https://my-kv.upstash.io/del/tunnel_url"
+    assert resolve_delete_endpoint("https://custom-webhook.internal/api") == "https://custom-webhook.internal/api"
+
+
+def test_delete_tunnel_url_success() -> None:
+    """Verify delete_tunnel_url sends POST /del/tunnel_url and returns True."""
+    from orchestrator.session_manager import delete_tunnel_url
+
+    mock_client = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_client.post.return_value = mock_resp
+
+    success = delete_tunnel_url(
+        endpoint_url="https://my-kv.upstash.io/set/tunnel_url",
+        auth_token="test-token",
+        client=mock_client,
+    )
+    assert success is True
+    mock_client.post.assert_called_once()
+    assert mock_client.post.call_args[0][0] == "https://my-kv.upstash.io/del/tunnel_url"
+    assert "headers" in mock_client.post.call_args[1]
+    assert mock_client.post.call_args[1]["headers"] == {"Authorization": "Bearer test-token"}
+
+
+def test_delete_tunnel_url_no_target_returns_false() -> None:
+    """Verify delete_tunnel_url returns False safely when no target configured."""
+    from orchestrator.session_manager import delete_tunnel_url
+
+    with patch.dict(os.environ, {}, clear=True):
+        assert delete_tunnel_url(endpoint_url=None) is False
+
+
+def test_cancel_kaggle_kernel_via_kagglesdk() -> None:
+    """Verify cancel_kaggle_kernel invokes kagglesdk cancellation with session ID."""
+    from orchestrator.session_manager import cancel_kaggle_kernel
+
+    with patch("kagglesdk.KaggleClient") as mock_client_cls:
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+
+        res = cancel_kaggle_kernel(
+            kernel_slug="avidok/audiogen",
+            kernel_session_id=12345,
+        )
+        assert res is True
+        mock_client.kernels.kernels_api_client.cancel_kernel_session.assert_called_once()
+
+
+def test_cancel_kaggle_kernel_unknown_session_id_returns_false() -> None:
+    """Verify cancel_kaggle_kernel returns False without invalid call when kernel_session_id is unknown."""
+    from orchestrator.session_manager import cancel_kaggle_kernel
+
+    with patch("kagglesdk.KaggleClient") as mock_client_cls:
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+
+        # If kernel_session_id is None, it should return False and never call cancel_kernel_session
+        res = cancel_kaggle_kernel(kernel_slug="avidok/audiogen", kernel_session_id=None)
+        assert res is False
+        mock_client.kernels.kernels_api_client.cancel_kernel_session.assert_not_called()
+
+
+def test_cancel_kaggle_kernel_api_exception_returns_false() -> None:
+    """Verify cancel_kaggle_kernel returns False when cancellation API raises an exception."""
+    from orchestrator.session_manager import cancel_kaggle_kernel
+
+    with patch("kagglesdk.KaggleClient") as mock_client_cls:
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+        mock_client.kernels.kernels_api_client.cancel_kernel_session.side_effect = RuntimeError("API error")
+
+        res = cancel_kaggle_kernel(kernel_slug="avidok/audiogen", kernel_session_id=12345)
+        assert res is False
+
 
