@@ -527,6 +527,45 @@ def create_app(
             voice_list = voices.registry.list_voices()
         return JSONResponse(status_code=status.HTTP_200_OK, content={"voices": voice_list})
 
+    @app.delete(
+        "/voices/{voice_id}",
+        status_code=status.HTTP_200_OK,
+        responses={
+            200: {"description": "Voice successfully deleted"},
+            400: {"model": ErrorResponse},
+            401: {"model": ErrorResponse},
+            404: {"model": ErrorResponse},
+        },
+    )
+    async def delete_voice(
+        voice_id: str,
+        request: Request = None,
+        _token: str = Depends(verify_bearer_token),
+    ) -> JSONResponse:
+        """Protected endpoint deleting a registered voice and its reference audio."""
+        active_watchdog = getattr(app.state, "watchdog", None)
+        if active_watchdog is not None:
+            active_watchdog.touch()
+
+        clean_id = re.sub(r"[^a-zA-Z0-9_-]", "", voice_id.strip())
+        if not clean_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid voice identifier.",
+            )
+
+        deleted = voices.registry.delete_voice(clean_id)
+        if not deleted:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Voice '{clean_id}' not found.",
+            )
+
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={"status": "deleted", "voice_id": clean_id},
+        )
+
     @app.post(
         "/shutdown",
         status_code=status.HTTP_200_OK,

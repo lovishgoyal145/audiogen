@@ -453,6 +453,60 @@ def register_voice(
         return get_voice_ref(clean_name, manifest_path=resolved_manifest)
 
 
+def delete_voice(
+    voice_name: str,
+    manifest_path: Optional[Union[str, Path]] = None,
+    delete_audio_file: bool = True,
+) -> bool:
+    """Remove a voice from registry_schema.json, optionally delete its audio file, and clear cache.
+
+    Args:
+        voice_name: Unique voice identifier key.
+        manifest_path: Optional custom manifest file path override.
+        delete_audio_file: If True, deletes the referenced audio file from disk if present.
+
+    Returns:
+        True if voice was found and deleted, False if voice was not in manifest.
+    """
+    clean_name = str(voice_name).strip()
+    with _REGISTRY_LOCK:
+        resolved_manifest = resolve_manifest_path(manifest_path)
+        if not resolved_manifest.is_file():
+            return False
+
+        with open(resolved_manifest, "r", encoding="utf-8") as f:
+            manifest_data = json.load(f)
+
+        if not isinstance(manifest_data, dict) or clean_name not in manifest_data:
+            return False
+
+        entry = manifest_data.pop(clean_name)
+
+        temp_manifest = resolved_manifest.with_suffix(f".tmp_{os.getpid()}")
+        with open(temp_manifest, "w", encoding="utf-8") as f:
+            json.dump(manifest_data, f, indent=2)
+        os.replace(temp_manifest, resolved_manifest)
+
+        clear_registry_cache()
+
+        if delete_audio_file:
+            raw_path_str = entry.get("path")
+            if raw_path_str:
+                p = Path(raw_path_str)
+                if not p.is_absolute():
+                    candidate = (resolved_manifest.parent / p).resolve()
+                    candidate_repo = (REPO_ROOT / p).resolve()
+                    if candidate.is_file():
+                        candidate.unlink(missing_ok=True)
+                    elif candidate_repo.is_file():
+                        candidate_repo.unlink(missing_ok=True)
+                else:
+                    if p.is_file():
+                        p.unlink(missing_ok=True)
+
+        return True
+
+
 __all__ = [
     "SUPPORTED_LANGUAGES",
     "VoiceNotFoundError",
@@ -464,4 +518,6 @@ __all__ = [
     "list_voices",
     "get_voice_metadata",
     "register_voice",
+    "delete_voice",
 ]
+

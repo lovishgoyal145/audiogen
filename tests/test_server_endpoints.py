@@ -1022,3 +1022,27 @@ def test_shutdown_authorized_returns_200_and_initiates_exit(
         assert mock_watchdog_action.called or mock_exit.called
 
 
+def test_delete_voice_endpoint(
+    app_and_client: Tuple[Any, TestClient],
+) -> None:
+    """Verify DELETE /voices/{voice_id} deletes voice and returns 200."""
+    _, client = app_and_client
+    headers = {"Authorization": "Bearer test-secret-token"}
+
+    # Unauthorized check
+    unauth = client.delete("/voices/nonexistent_voice")
+    assert unauth.status_code == 401
+
+    # Not found check
+    with patch("voices.registry.delete_voice", return_value=False):
+        res404 = client.delete("/voices/unknown_voice", headers=headers)
+        assert res404.status_code == 404
+
+    # Success check
+    with patch("voices.registry.delete_voice", return_value=True):
+        res200 = client.delete("/voices/test_voice_to_delete", headers=headers)
+        assert res200.status_code == 200
+        assert res200.json() == {"status": "deleted", "voice_id": "test_voice_to_delete"}
+
+
+

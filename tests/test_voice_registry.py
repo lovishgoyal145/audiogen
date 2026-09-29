@@ -629,3 +629,37 @@ def test_registered_reference_transcripts_authentic() -> None:
     assert len(female["ref_text"]) > 20
 
 
+def test_delete_voice_success(tmp_path: Path) -> None:
+    """Verify delete_voice removes entry from manifest and unlinks audio file."""
+    from voices.registry import register_voice, delete_voice, list_voices
+
+    manifest_file = tmp_path / "custom_registry.json"
+    manifest_file.write_text("{}", encoding="utf-8")
+    dummy_audio = tmp_path / "test_delete.wav"
+
+
+    with wave.open(str(dummy_audio), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(24000)
+        wf.writeframes(b"\x00\x00" * 24000 * 2)
+
+    register_voice(
+        voice_name="temporary_voice",
+        ref_audio_path=dummy_audio,
+        ref_text="Temporary text for test deletion",
+        languages=["en"],
+        manifest_path=manifest_file,
+    )
+
+    assert "temporary_voice" in list_voices() or manifest_file.exists()
+
+    # Delete voice
+    assert delete_voice("temporary_voice", manifest_path=manifest_file, delete_audio_file=True) is True
+    # Deleting again returns False
+    assert delete_voice("temporary_voice", manifest_path=manifest_file) is False
+    # File was unlinked
+    assert not dummy_audio.exists()
+
+
+

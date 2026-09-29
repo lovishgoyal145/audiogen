@@ -403,6 +403,26 @@
       background-color: var(--accent);
     }
 
+    .voice-delete-btn {
+      background: transparent;
+      border: none;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 1.1rem;
+      padding: 2px 6px;
+      border-radius: 4px;
+      line-height: 1;
+      transition: color 0.15s ease, background-color 0.15s ease;
+      margin-left: auto;
+      margin-right: 8px;
+    }
+
+    .voice-delete-btn:hover {
+      color: var(--danger);
+      background-color: rgba(239, 68, 68, 0.15);
+    }
+
+
     .empty-voices {
       font-size: 0.825rem;
       color: var(--muted);
@@ -1313,6 +1333,8 @@
           selectedVoice = voices[0];
         }
 
+        const BUILTIN_VOICES = ["anchor_female_calm", "anchor_male_energetic", "narrator_english_neutral", "storyteller_punjabi_elder", "setup_test_voice"];
+
         voices.forEach(voice => {
           const card = document.createElement("div");
           card.className = "voice-card" + (voice === selectedVoice ? " active" : "");
@@ -1331,11 +1353,35 @@
 
           info.appendChild(nameSpan);
           info.appendChild(descSpan);
+          card.appendChild(info);
+
+          if (!BUILTIN_VOICES.includes(voice)) {
+            const delBtn = document.createElement("button");
+            delBtn.className = "voice-delete-btn";
+            delBtn.title = "Delete voice";
+            delBtn.innerHTML = "&times;";
+            delBtn.addEventListener("click", async (e) => {
+              e.stopPropagation();
+              if (!confirm(`Delete voice "${formatVoiceName(voice)}"?`)) return;
+              try {
+                const resp = await fetch(profileUrl(`/voices/${encodeURIComponent(voice)}`), {
+                  method: "DELETE"
+                });
+                if (!resp.ok) {
+                  const errData = await resp.json().catch(() => ({}));
+                  throw new Error(errData.detail || "Failed to delete voice");
+                }
+                showToast(`Voice "${formatVoiceName(voice)}" deleted`, "success");
+                await loadVoices(selectedLanguage);
+              } catch (err) {
+                showToast(err.message, "danger");
+              }
+            });
+            card.appendChild(delBtn);
+          }
 
           const radio = document.createElement("div");
           radio.className = "voice-radio";
-
-          card.appendChild(info);
           card.appendChild(radio);
 
           card.addEventListener("click", () => {
@@ -1344,6 +1390,7 @@
 
           voiceListContainer.appendChild(card);
         });
+
 
         selectVoice(selectedVoice);
       } catch (err) {
