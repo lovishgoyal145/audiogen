@@ -410,4 +410,89 @@ def test_synthesizer_delegation_to_kaggle_bridge_when_backend_none(
         assert call_args[0] == "नमस्ते भारत"
         assert str(dummy_ref_audio) in str(call_kwargs.get("ref_audio_path"))
         assert call_kwargs.get("ref_text") == "संदर्भ पाठ"
+        assert call_kwargs.get("speed") == 1.0
+
+
+def test_synthesizer_passes_custom_speed_to_backend(dummy_ref_audio: Path) -> None:
+    """Verify Synthesizer.synthesize passes speed parameter to backend."""
+    received_kwargs = {}
+
+    class SpeedAwareBackend:
+        def synthesize(self, text: str, ref_audio_path: str, ref_text: str, speed: float = 1.0):
+            received_kwargs["speed"] = speed
+            return np.array([0.1, -0.1], dtype=np.float32), 24000
+
+    synth = Synthesizer(backend=SpeedAwareBackend())
+    synth.synthesize("नमस्ते", dummy_ref_audio, "संदर्भ", speed=1.5)
+    assert received_kwargs.get("speed") == 1.5
+
+
+def test_synthesizer_updates_backend_config_speed(dummy_ref_audio: Path) -> None:
+    """Verify Synthesizer.synthesize updates backend.config.speed if present (IndicF5 architecture)."""
+    class ConfigObj:
+        speed = 1.0
+
+    class ConfigBackend:
+        config = ConfigObj()
+
+        def __call__(self, text: str, ref_audio_path: str, ref_text: str):
+            return np.array([0.1, -0.1], dtype=np.float32), 24000
+
+    backend = ConfigBackend()
+    synth = Synthesizer(backend=backend)
+    synth.synthesize("नमस्ते", dummy_ref_audio, "संदर्भ", speed=1.25)
+    assert backend.config.speed == 1.25
+
+
+def test_synthesizer_fallback_when_backend_rejects_speed_kwarg(dummy_ref_audio: Path) -> None:
+    """Verify graceful fallback when backend does not accept speed keyword argument."""
+    class StrictLegacyBackend:
+        def __call__(self, text: str, ref_audio_path: str, ref_text: str):
+            # Does not accept **kwargs or speed
+            return np.array([0.2, -0.2], dtype=np.float32), 24000
+
+    synth = Synthesizer(backend=StrictLegacyBackend())
+    wav, sr = synth.synthesize("नमस्ते", dummy_ref_audio, "संदर्भ", speed=1.5)
+    assert sr == 24000
+    assert len(wav) == 2
+
+
+def test_synthesizer_duration_scales_with_speed_in_local_weights(
+    dummy_model_file: Path, dummy_ref_audio: Path
+) -> None:
+    """Verify duration scales inversely with speed under local weights synthesis."""
+    synth = Synthesizer(model_path=dummy_model_file, sample_rate=24000)
+
+    text = "नमस्ते भारत यह गति परीक्षण के लिए एक बहुत लम्बा वाक्य है ताकि अवधि में अंतर स्पष्ट हो"
+    wav_normal, _ = synth.synthesize(text, dummy_ref_audio, "संदर्भ", speed=1.0)
+    wav_fast, _ = synth.synthesize(text, dummy_ref_audio, "संदर्भ", speed=2.0)
+    wav_slow, _ = synth.synthesize(text, dummy_ref_audio, "संदर्भ", speed=0.5)
+
+    assert len(wav_fast) < len(wav_normal)
+    assert len(wav_slow) > len(wav_normal)
+
+
+def test_synthesizer_delegates_custom_speed_to_kaggle_bridge(dummy_ref_audio: Path) -> None:
+    """Verify Synthesizer forwards custom speed to KaggleExecutionBridge when backend is None."""
+    synth = Synthesizer.__new__(Synthesizer)
+    synth._backend = None
+    synth._model_path = None
+    synth._sample_rate = 24000
+
+    test_wave = np.array([0.1, -0.1], dtype=np.float32)
+    with patch("audiogen.engine.KaggleExecutionBridge.synthesize", return_value=(test_wave, 24000)) as mock_bridge:
+        synth.synthesize("नमस्ते भारत", dummy_ref_audio, "संदर्भ पाठ", speed=1.75)
+        mock_bridge.assert_called_once()
+        _, call_kwargs = mock_bridge.call_args
+        assert call_kwargs.get("speed") == 1.75
+
+
+def test_synthesizer_rejects_non_positive_speed(dummy_ref_audio: Path) -> None:
+    """Verify Synthesizer raises ValueError when speed is zero or negative."""
+    synth = Synthesizer(backend=MockTTSBackend())
+    with pytest.raises(ValueError, match="Speed must be positive"):
+        synth.synthesize("नमस्ते", dummy_ref_audio, "संदर्भ", speed=0.0)
+
+    with pytest.raises(ValueError, match="Speed must be positive"):
+        synth.synthesize("नमस्ते", dummy_ref_audio, "संदर्भ", speed=-1.0)
 

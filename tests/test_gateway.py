@@ -404,6 +404,71 @@ def test_generate_forwards_remote_error_when_ready(
         assert resp.json() == {"detail": "Unknown voice name: invalid_voice"}
 
 
+def test_generate_proxies_custom_speed_when_ready(
+    client: TestClient,
+    test_gateway: SessionGateway,
+) -> None:
+    """Verify POST /generate with custom speed proxies speed value to remote worker."""
+    test_gateway._state = "READY"
+    test_gateway._tunnel_url = "https://tunnel.trycloudflare.com"
+
+    payload = {
+        "text": "नमस्ते भारत",
+        "language": "hi",
+        "speaker_ref_name": "anchor_male_energetic",
+        "speed": 1.25,
+    }
+
+    mock_audio_bytes = b"RIFFcustomspeedwavdata"
+
+    async def mock_post(url: str, json: dict, headers: dict, **kwargs):
+        assert url == "https://tunnel.trycloudflare.com/generate"
+        assert json.get("speed") == 1.25
+        return httpx.Response(
+            status_code=200,
+            content=mock_audio_bytes,
+            headers={"content-type": "audio/wav"},
+        )
+
+    with patch("httpx.AsyncClient.post", side_effect=mock_post):
+        resp = client.post("/generate", json=payload)
+        assert resp.status_code == 200
+        assert resp.content == mock_audio_bytes
+
+
+def test_generate_rejects_out_of_range_speed_with_422(
+    client: TestClient,
+    test_gateway: SessionGateway,
+) -> None:
+    """Verify POST /generate rejects speed values outside [0.2, 3.0] with 422."""
+    test_gateway._state = "READY"
+    test_gateway._tunnel_url = "https://tunnel.trycloudflare.com"
+
+    # Speed too low
+    resp_low = client.post(
+        "/generate",
+        json={
+            "text": "नमस्ते",
+            "language": "hi",
+            "speaker_ref_name": "anchor_male_energetic",
+            "speed": 0.1,
+        },
+    )
+    assert resp_low.status_code == 422
+
+    # Speed too high
+    resp_high = client.post(
+        "/generate",
+        json={
+            "text": "नमस्ते",
+            "language": "hi",
+            "speaker_ref_name": "anchor_male_energetic",
+            "speed": 3.5,
+        },
+    )
+    assert resp_high.status_code == 422
+
+
 # ==============================================================================
 # 3. Voice Listing & UI Route Tests
 # ==============================================================================

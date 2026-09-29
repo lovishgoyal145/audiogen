@@ -85,6 +85,7 @@ class GenerateRequest(BaseModel):
     text: str = Field(..., description="Text in English, Hindi, or Punjabi to synthesize")
     language: str = Field(..., description="Language code ('en', 'hi', or 'pa')")
     speaker_ref_name: str = Field(..., description="Voice name matching voices registry manifest")
+    speed: float = Field(default=1.0, ge=0.2, le=3.0, description="Generation speed factor (default: 1.0)")
     return_uri: bool = Field(default=False, description="If True, returns file URI instead of binary audio")
 
 
@@ -338,6 +339,7 @@ def create_app(
                         payload.text,
                         ref_audio_path=voice_rec.path,
                         ref_text=voice_rec.ref_text,
+                        speed=payload.speed,
                     ),
                 )
                 if isinstance(result, tuple):

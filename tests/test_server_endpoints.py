@@ -391,6 +391,66 @@ def test_generate_calls_synthesizer_with_indicf5_signature(app_and_client: Tuple
         assert call_args[0] == "नमस्ते भारत"
         assert call_kwargs["ref_audio_path"] == voice_rec.path
         assert call_kwargs["ref_text"] == voice_rec.ref_text
+        assert call_kwargs["speed"] == 1.0
+
+
+def test_generate_with_default_speed_passes_1_0(app_and_client: Tuple[Any, TestClient]) -> None:
+    """Verify POST /generate without speed parameter defaults to 1.0 and forwards speed=1.0 to synthesizer."""
+    app, client = app_and_client
+    headers = {"Authorization": "Bearer test-secret-token"}
+    voice_name = "anchor_male_energetic"
+
+    with patch.object(app.state.synthesizer, "synthesize", wraps=app.state.synthesizer.synthesize) as synth_spy:
+        res = client.post(
+            "/generate",
+            json={"text": "नमस्ते भारत", "language": "hi", "speaker_ref_name": voice_name},
+            headers=headers,
+        )
+        assert res.status_code == 200
+        synth_spy.assert_called_once()
+        _, call_kwargs = synth_spy.call_args
+        assert call_kwargs["speed"] == 1.0
+
+
+def test_generate_with_custom_speed_passes_to_synthesizer(app_and_client: Tuple[Any, TestClient]) -> None:
+    """Verify POST /generate with custom speed forwards selected speed to synthesizer."""
+    app, client = app_and_client
+    headers = {"Authorization": "Bearer test-secret-token"}
+    voice_name = "anchor_male_energetic"
+
+    with patch.object(app.state.synthesizer, "synthesize", wraps=app.state.synthesizer.synthesize) as synth_spy:
+        res = client.post(
+            "/generate",
+            json={"text": "नमस्ते भारत", "language": "hi", "speaker_ref_name": voice_name, "speed": 1.25},
+            headers=headers,
+        )
+        assert res.status_code == 200
+        synth_spy.assert_called_once()
+        _, call_kwargs = synth_spy.call_args
+        assert call_kwargs["speed"] == 1.25
+
+
+def test_generate_with_invalid_speed_returns_422(app_and_client: Tuple[Any, TestClient]) -> None:
+    """Verify POST /generate with speed outside allowed range [0.2, 3.0] returns 422."""
+    _, client = app_and_client
+    headers = {"Authorization": "Bearer test-secret-token"}
+    voice_name = "anchor_male_energetic"
+
+    # Too small
+    res_low = client.post(
+        "/generate",
+        json={"text": "नमस्ते भारत", "language": "hi", "speaker_ref_name": voice_name, "speed": 0.1},
+        headers=headers,
+    )
+    assert res_low.status_code == 422
+
+    # Too large
+    res_high = client.post(
+        "/generate",
+        json={"text": "नमस्ते भारत", "language": "hi", "speaker_ref_name": voice_name, "speed": 3.5},
+        headers=headers,
+    )
+    assert res_high.status_code == 422
 
 
 def test_generate_synthesizer_raises_file_not_found_returns_500(app_and_client: Tuple[Any, TestClient]) -> None:

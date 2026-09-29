@@ -77,6 +77,7 @@ class KaggleExecutionBridge:
         ref_audio_path: Union[str, Path],
         ref_text: str,
         language: Optional[str] = None,
+        speed: float = 1.0,
         staging_dir: Optional[Union[str, Path]] = None,
     ) -> Tuple[Path, str]:
         """Stage Kaggle batch synthesis notebook, scripts.json, and kernel-metadata.json."""
@@ -132,6 +133,7 @@ class KaggleExecutionBridge:
             "language": lang,
             "voice_ref": voice_ref,
             "ref_text": ref_text,
+            "speed": float(speed),
         }
         manifest_data = {"tasks": [task_dict]}
 
@@ -321,6 +323,7 @@ class KaggleExecutionBridge:
         ref_audio_path: Union[str, Path],
         ref_text: str,
         language: Optional[str] = None,
+        speed: float = 1.0,
     ) -> Tuple[np.ndarray, int]:
         """Execute real-world zero-mock audio synthesis on Kaggle cloud GPU."""
         self.validate_credentials()
@@ -331,6 +334,7 @@ class KaggleExecutionBridge:
             ref_audio_path=ref_audio_path,
             ref_text=ref_text,
             language=language,
+            speed=speed,
         )
 
         out_temp = Path(tempfile.mkdtemp(prefix="audiogen_out_")).resolve()
@@ -614,6 +618,7 @@ class Synthesizer:
         ref_text: Optional[str] = None,
         language: Optional[str] = None,
         speaker_ref: Optional[Any] = None,
+        speed: float = 1.0,
         **kwargs: Any,
     ) -> Tuple[np.ndarray, int]:
         """Synthesize speech waveform using IndicF5 zero-shot voice cloning.
@@ -666,6 +671,9 @@ class Synthesizer:
         target_ref_audio: Any = ref_audio_path
         target_ref_text: Any = ref_text
         detected_lang: Optional[str] = language
+        target_speed: float = float(kwargs.get("speed", speed))
+        if target_speed <= 0:
+            raise ValueError(f"Speed must be positive, got {target_speed}")
 
         if "speaker_ref" in kwargs and speaker_ref is None:
             speaker_ref = kwargs["speaker_ref"]
@@ -786,6 +794,9 @@ class Synthesizer:
 
         # Model inference
         if self._backend is not None:
+            if hasattr(self._backend, "config") and hasattr(self._backend.config, "speed"):
+                self._backend.config.speed = target_speed
+
             backend_fn = getattr(self._backend, "synthesize", self._backend)
             if not callable(backend_fn):
                 raise RuntimeError("Injected backend must be callable or provide a synthesize method.")
@@ -802,12 +813,20 @@ class Synthesizer:
 
             with inference_ctx:
                 try:
-                    result = backend_fn(text, ref_audio_path=str(ref_path), ref_text=target_ref_text)
+                    result = backend_fn(
+                        text,
+                        ref_audio_path=str(ref_path),
+                        ref_text=target_ref_text,
+                        speed=target_speed,
+                    )
                 except TypeError:
                     try:
-                        result = backend_fn(text, str(ref_path), target_ref_text)
+                        result = backend_fn(text, ref_audio_path=str(ref_path), ref_text=target_ref_text)
                     except TypeError:
-                        result = backend_fn(text, detected_lang or "hi", str(ref_path))
+                        try:
+                            result = backend_fn(text, str(ref_path), target_ref_text)
+                        except TypeError:
+                            result = backend_fn(text, detected_lang or "hi", str(ref_path))
 
             if isinstance(result, tuple):
                 waveform, sr = result
@@ -835,7 +854,7 @@ class Synthesizer:
             if ref_wave.ndim > 1:
                 ref_wave = ref_wave.mean(axis=1)
             chars = [c for c in text if not c.isspace()]
-            duration_sec = max(0.2, len(chars) * 0.08)
+            duration_sec = max(0.2, (len(chars) * 0.08) / target_speed)
             target_samples = int(sr * duration_sec)
             if len(ref_wave) > 0:
                 repeats = int(np.ceil(target_samples / len(ref_wave)))
@@ -851,4 +870,5 @@ class Synthesizer:
             ref_audio_path=ref_path,
             ref_text=target_ref_text,
             language=detected_lang,
+            speed=target_speed,
         )

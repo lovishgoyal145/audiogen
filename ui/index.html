@@ -565,6 +565,24 @@
           <input type="password" id="kaggle-key-input" placeholder="e.g. 7a8b9c1d2e3f..." autocomplete="new-password" style="background-color: #18181b; border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 0.875rem; padding: 10px 12px; outline: none; width: 100%; font-family: inherit;" />
         </div>
 
+        <div class="form-group" style="margin-bottom: 0;">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <label style="font-size: 0.8rem; font-weight: 500; color: var(--text);">Hugging Face Access Token (HF_TOKEN)</label>
+            <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noopener noreferrer" style="font-size: 0.72rem; color: var(--accent); text-decoration: underline;">Get Token</a>
+          </div>
+          <input type="password" id="hf-token-input" placeholder="e.g. hf_..." autocomplete="new-password" style="background-color: #18181b; border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 0.875rem; padding: 10px 12px; outline: none; width: 100%; font-family: inherit;" />
+          <span style="font-size: 0.72rem; color: var(--muted); margin-top: 2px;">Strictly profile-isolated. Required for downloading IndicF5 weights without sharing tokens across profiles.</span>
+        </div>
+
+        <div class="form-group" style="margin-bottom: 0;">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <label style="font-size: 0.8rem; font-weight: 500; color: var(--text);">GitHub Personal Access Token (Optional)</label>
+            <a href="https://github.com/settings/tokens" target="_blank" rel="noopener noreferrer" style="font-size: 0.72rem; color: var(--accent); text-decoration: underline;">Get PAT</a>
+          </div>
+          <input type="password" id="github-pat-input" placeholder="e.g. ghp_..." autocomplete="new-password" style="background-color: #18181b; border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 0.875rem; padding: 10px 12px; outline: none; width: 100%; font-family: inherit;" />
+          <span style="font-size: 0.72rem; color: var(--muted); margin-top: 2px;">Optional profile-specific PAT for private repositories, packages, or custom assets.</span>
+        </div>
+
         <div style="display: flex; align-items: center; gap: 10px; margin: 2px 0;">
           <div style="flex: 1; height: 1px; background: var(--border);"></div>
           <span style="font-size: 0.7rem; color: var(--muted); text-transform: uppercase;">or upload file</span>
@@ -719,6 +737,19 @@
           <textarea id="script-input" placeholder="Enter text to synthesize..."></textarea>
         </div>
 
+        <div class="form-group">
+          <label for="speed-select">
+            <span>Speed</span>
+          </label>
+          <select id="speed-select">
+            <option value="0.5">0.5x (Slow)</option>
+            <option value="0.75">0.75x</option>
+            <option value="1.0" selected>1.0x (Default)</option>
+            <option value="1.25">1.25x</option>
+            <option value="1.5">1.5x (Fast)</option>
+          </select>
+        </div>
+
         <button id="generate-btn" class="primary">Generate Audio</button>
 
         <!-- Synthesis Progress -->
@@ -817,6 +848,8 @@
     const wizardKaggleState = document.getElementById("wizard-kaggle-state");
     const kaggleUsernameInput = document.getElementById("kaggle-username-input");
     const kaggleKeyInput = document.getElementById("kaggle-key-input");
+    const hfTokenInput = document.getElementById("hf-token-input");
+    const githubPatInput = document.getElementById("github-pat-input");
     const kaggleFileInput = document.getElementById("kaggle-file-input");
     const kaggleFormError = document.getElementById("kaggle-form-error");
     const btnValidateContinue = document.getElementById("btn-validate-continue");
@@ -1471,6 +1504,8 @@
       const text = scriptInput.value.trim();
       const language = selectedLanguage;
       const voice = selectedVoice;
+      const speedEl = document.getElementById("speed-select");
+      const speed = speedEl ? parseFloat(speedEl.value) || 1.0 : 1.0;
 
       if (!text) {
         showError("Please enter script text before generating.");
@@ -1493,6 +1528,7 @@
             text: text,
             language: language,
             speaker_ref_name: voice,
+            speed: speed,
             return_uri: false,
           })
         });
@@ -1560,6 +1596,8 @@
     async function handleValidateAndContinue() {
       const username = kaggleUsernameInput.value.trim();
       const key = kaggleKeyInput.value.trim();
+      const hfToken = hfTokenInput ? hfTokenInput.value.trim() : "";
+      const githubPat = githubPatInput ? githubPatInput.value.trim() : "";
       kaggleFormError.style.display = "none";
 
       if (!username || !key) {
@@ -1572,15 +1610,21 @@
       btnValidateContinue.textContent = "Validating...";
 
       try {
+        const payload = { username, key };
+        if (hfToken) payload.hf_token = hfToken;
+        if (githubPat) payload.github_pat = githubPat;
+
         const resp = await fetch(profileUrl("/setup/credentials/kaggle"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ username, key })
+          body: JSON.stringify(payload)
         });
         const res = await resp.json();
 
-        // Never display the API key in plaintext after submission
+        // Never display secret keys or tokens in plaintext after submission
         kaggleKeyInput.value = "";
+        if (hfTokenInput) hfTokenInput.value = "";
+        if (githubPatInput) githubPatInput.value = "";
 
         if (resp.ok && res.status === "ok") {
           // Immediately advance without requiring another click

@@ -47,6 +47,10 @@ REQUIRED_SECRET_KEYS: List[str] = [
 
 OPTIONAL_SECRET_KEYS: List[str] = [
     "HF_TOKEN",
+    "HUGGING_FACE_HUB_TOKEN",
+    "GITHUB_PAT",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
 ]
 
 REQUIRED_AUTH_KEYS: List[str] = [
@@ -64,12 +68,18 @@ class SecretSyncError(RuntimeError):
 def load_secrets_config(
     env_file_path: Optional[Path] = None,
     secrets_override: Optional[Dict[str, str]] = None,
+    dataset_slug_override: Optional[str] = None,
 ) -> Dict[str, str]:
     """Load and validate required secrets and credentials from .env, environment, and overrides.
+
+    In profile isolation mode (when secrets_override or dataset_slug_override is supplied),
+    identity tokens (such as HF_TOKEN, GITHUB_PAT) are strictly NOT inherited from global
+    .env or ambient environment. They must be explicitly provided in secrets_override.
 
     Args:
         env_file_path: Optional path to .env file.
         secrets_override: Optional explicit secret key-value overrides.
+        dataset_slug_override: Optional dataset slug indicating profile-isolated execution.
 
     Returns:
         Dictionary containing all required keys with non-empty string values.
@@ -77,27 +87,38 @@ def load_secrets_config(
     Raises:
         ValueError: If any required key is missing or empty.
     """
+    is_profile_isolation = (secrets_override is not None) or (dataset_slug_override is not None)
     target_env = env_file_path or (REPO_ROOT / ".env")
     env_values: Dict[str, str] = {}
 
-    # System environment provides fallback only when explicit env file is not specified
-    if env_file_path is None:
-        for k in REQUIRED_SECRET_KEYS + REQUIRED_AUTH_KEYS + OPTIONAL_SECRET_KEYS:
-            if k in os.environ and os.environ[k].strip():
-                env_values[k] = os.environ[k].strip()
+    if not is_profile_isolation:
+        # Non-profile standalone mode: load from system environment and root .env
+        if env_file_path is None:
+            for k in REQUIRED_SECRET_KEYS + REQUIRED_AUTH_KEYS + OPTIONAL_SECRET_KEYS:
+                if k in os.environ and os.environ[k].strip():
+                    env_values[k] = os.environ[k].strip()
 
-    # Target .env file is authoritative
-    if target_env.is_file() and dotenv is not None:
-        file_vals = dotenv.dotenv_values(target_env)
-        for k, v in file_vals.items():
-            if v is not None and str(v).strip():
-                env_values[k] = str(v).strip()
+        if target_env.is_file() and dotenv is not None:
+            file_vals = dotenv.dotenv_values(target_env)
+            for k, v in file_vals.items():
+                if v is not None and str(v).strip():
+                    env_values[k] = str(v).strip()
+    else:
+        # Profile isolation mode: only load non-sensitive base configuration as fallback
+        if target_env.is_file() and dotenv is not None:
+            file_vals = dotenv.dotenv_values(target_env)
+            for k in REQUIRED_SECRET_KEYS + REQUIRED_AUTH_KEYS:
+                if k in file_vals and file_vals[k] and str(file_vals[k]).strip():
+                    env_values[k] = str(file_vals[k]).strip()
+        # NEVER inherit any OPTIONAL_SECRET_KEYS (HF_TOKEN, GITHUB_PAT, etc.) from global .env
 
-    # Explicit overrides take highest precedence
+    # Explicit overrides take highest precedence and define profile-specific tokens
     if secrets_override is not None:
         for k, v in secrets_override.items():
             if v is not None and str(v).strip():
                 env_values[k] = str(v).strip()
+            elif k in env_values:
+                del env_values[k]
 
     missing = []
     for k in REQUIRED_SECRET_KEYS + REQUIRED_AUTH_KEYS:
@@ -119,7 +140,7 @@ def compute_secrets_hash(config: Dict[str, str]) -> str:
     for k in OPTIONAL_SECRET_KEYS:
         if k in config:
             keys_to_hash.append(k)
-    payload = "|".join(config[k] for k in keys_to_hash)
+    payload = "|".join(f"{k}:{config[k]}" for k in sorted(keys_to_hash))
     # Include modification timestamps of packaged files so code updates trigger sync
     code_marker = ""
     for check_file in (
@@ -226,7 +247,11 @@ def sync_secrets_dataset(
         ValueError: If required configuration is missing.
         SecretSyncError: If Kaggle CLI operations fail.
     """
-    config = load_secrets_config(env_file_path, secrets_override=secrets_override)
+    config = load_secrets_config(
+        env_file_path,
+        secrets_override=secrets_override,
+        dataset_slug_override=dataset_slug_override,
+    )
     username = config["KAGGLE_USERNAME"]
     raw_slug = dataset_slug_override or f"{username}/audiogen-secrets"
 

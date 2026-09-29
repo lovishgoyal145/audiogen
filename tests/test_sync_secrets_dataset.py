@@ -337,3 +337,102 @@ def test_validate_dataset_status_missing_username_raises_error(monkeypatch: pyte
     assert "KAGGLE_USERNAME must be defined" in str(exc_info.value)
 
 
+def test_load_secrets_config_profile_isolation_no_leakage(
+    tmp_path: Path, valid_config: Dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify profile isolation mode does NOT leak HF_TOKEN or GITHUB_PAT from .env or os.environ."""
+    # Place global tokens in .env and environment
+    monkeypatch.setenv("HF_TOKEN", "global-ambient-hf-token")
+    monkeypatch.setenv("GITHUB_PAT", "global-ambient-github-pat")
+
+    env_file = tmp_path / ".env"
+    lines = [f"{k}={v}" for k, v in valid_config.items()]
+    lines.append("HF_TOKEN=global-env-file-hf-token")
+    lines.append("GITHUB_PAT=global-env-file-github-pat")
+    env_file.write_text("\n".join(lines), encoding="utf-8")
+
+    # In profile isolation mode (dataset_slug_override provided, no profile-specific tokens set):
+    loaded = load_secrets_config(
+        env_file_path=env_file,
+        dataset_slug_override="testuser/audiogen-secrets-testprofile",
+    )
+    # Global tokens MUST NOT be inherited
+    assert "HF_TOKEN" not in loaded
+    assert "GITHUB_PAT" not in loaded
+    assert "HUGGING_FACE_HUB_TOKEN" not in loaded
+    assert "GITHUB_TOKEN" not in loaded
+
+
+def test_load_secrets_config_profile_isolation_with_override(
+    tmp_path: Path, valid_config: Dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify profile-specific tokens in secrets_override are correctly loaded and produce distinct hashes."""
+    monkeypatch.setenv("HF_TOKEN", "global-ambient-hf-token")
+
+    env_file = tmp_path / ".env"
+    lines = [f"{k}={v}" for k, v in valid_config.items()]
+    env_file.write_text("\n".join(lines), encoding="utf-8")
+
+    # Profile A override
+    override_a = {
+        "HF_TOKEN": "hf_profile_a_secret_token",
+        "GITHUB_PAT": "gh_profile_a_pat",
+    }
+    loaded_a = load_secrets_config(
+        env_file_path=env_file,
+        dataset_slug_override="testuser/audiogen-secrets-profile-a",
+        secrets_override=override_a,
+    )
+    assert loaded_a["HF_TOKEN"] == "hf_profile_a_secret_token"
+    assert loaded_a["GITHUB_PAT"] == "gh_profile_a_pat"
+
+    # Profile B override
+    override_b = {
+        "HF_TOKEN": "hf_profile_b_secret_token",
+        "GITHUB_PAT": "gh_profile_b_pat",
+    }
+    loaded_b = load_secrets_config(
+        env_file_path=env_file,
+        dataset_slug_override="testuser/audiogen-secrets-profile-b",
+        secrets_override=override_b,
+    )
+    assert loaded_b["HF_TOKEN"] == "hf_profile_b_secret_token"
+    assert loaded_b["GITHUB_PAT"] == "gh_profile_b_pat"
+
+    # Hashes between profiles must differ
+    hash_a = compute_secrets_hash(loaded_a)
+    hash_b = compute_secrets_hash(loaded_b)
+    assert hash_a != hash_b
+
+
+def test_stage_dataset_files_profile_isolation_tokens(tmp_path: Path, valid_config: Dict[str, str]) -> None:
+    """Verify stage_dataset_files writes profile-isolated tokens to secrets.json and individual files with 0600 permissions."""
+    stage_dir = tmp_path / "stage_isolated"
+    stage_dir.mkdir()
+    config_isolated = dict(valid_config)
+    config_isolated["HF_TOKEN"] = "hf_isolated_123"
+    config_isolated["GITHUB_PAT"] = "ghp_isolated_456"
+
+    stage_dataset_files(stage_dir, "testuser/audiogen-secrets-isolated", config_isolated)
+
+    sec_json_path = stage_dir / "secrets.json"
+    assert sec_json_path.is_file()
+    assert stat.S_IMODE(sec_json_path.stat().st_mode) == 0o600
+
+    data = json.loads(sec_json_path.read_text(encoding="utf-8"))
+    assert data["HF_TOKEN"] == "hf_isolated_123"
+    assert data["GITHUB_PAT"] == "ghp_isolated_456"
+
+    # Verify individual secret files
+    hf_file = stage_dir / "HF_TOKEN"
+    assert hf_file.is_file()
+    assert stat.S_IMODE(hf_file.stat().st_mode) == 0o600
+    assert hf_file.read_text(encoding="utf-8") == "hf_isolated_123"
+
+    gh_file = stage_dir / "GITHUB_PAT"
+    assert gh_file.is_file()
+    assert stat.S_IMODE(gh_file.stat().st_mode) == 0o600
+    assert gh_file.read_text(encoding="utf-8") == "ghp_isolated_456"
+
+
+

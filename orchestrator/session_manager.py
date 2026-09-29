@@ -152,6 +152,7 @@ def _kaggle_push(
     kaggle_cmd: Optional[List[str]] = None,
     secrets_cache_dir: Optional[Path] = None,
     dataset_slug_override: Optional[str] = None,
+    secrets_override: Optional[Dict[str, str]] = None,
 ) -> None:
     """Invoke `kaggle kernels push`.
 
@@ -165,6 +166,7 @@ def _kaggle_push(
         kaggle_cmd: Optional binary / command override for Kaggle CLI (e.g. ['kaggle']).
         secrets_cache_dir: Optional directory for .secrets_dataset_hash.
         dataset_slug_override: Optional pre-synced dataset slug override.
+        secrets_override: Optional explicit secret key-value overrides for profile isolation.
 
     Raises:
         KagglePushError: If the Kaggle CLI is missing, times out, or fails.
@@ -183,24 +185,25 @@ def _kaggle_push(
     created_temp_meta = False
 
     try:
-        if dataset_slug_override:
-            dataset_slug = dataset_slug_override
-        else:
-            # Check sync_secrets_dataset availability
-            if sync_secrets_dataset is None:
-                raise KagglePushError(
-                    "Secret dataset synchronization utility (scripts.sync_secrets_dataset) is unavailable."
-                )
+        # Check sync_secrets_dataset availability
+        if sync_secrets_dataset is None:
+            raise KagglePushError(
+                "Secret dataset synchronization utility (scripts.sync_secrets_dataset) is unavailable."
+            )
 
-            # Ensure private Kaggle secret dataset is synced before pushing kernel
-            try:
-                if secrets_cache_dir is not None:
-                    dataset_slug = sync_secrets_dataset(kaggle_cmd=kaggle_cmd, cache_dir=secrets_cache_dir)
-                else:
-                    dataset_slug = sync_secrets_dataset(kaggle_cmd=kaggle_cmd)
-            except Exception as exc:
-                logger.error("Failed to synchronize Kaggle secrets dataset: %s", exc)
-                raise KagglePushError(f"Secret dataset sync failed prior to push: {exc}") from exc
+        # Ensure private Kaggle secret dataset is synced before pushing kernel
+        try:
+            sync_kwargs: Dict[str, Any] = {"kaggle_cmd": kaggle_cmd}
+            if secrets_cache_dir is not None:
+                sync_kwargs["cache_dir"] = secrets_cache_dir
+            if dataset_slug_override is not None:
+                sync_kwargs["dataset_slug_override"] = dataset_slug_override
+            if secrets_override is not None:
+                sync_kwargs["secrets_override"] = secrets_override
+            dataset_slug = sync_secrets_dataset(**sync_kwargs)
+        except Exception as exc:
+            logger.error("Failed to synchronize Kaggle secrets dataset: %s", exc)
+            raise KagglePushError(f"Secret dataset sync failed prior to push: {exc}") from exc
 
         resolved_slug = _resolve_kernel_slug(kernel_slug)
         parts = resolved_slug.split("/")

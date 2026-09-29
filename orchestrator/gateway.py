@@ -227,6 +227,7 @@ class GeneratePayload(BaseModel):
     text: str = Field(..., description="Text to synthesize")
     language: str = Field(..., description="Language code ('en', 'hi', or 'pa')")
     speaker_ref_name: str = Field(..., description="Voice name matching voices registry")
+    speed: float = Field(default=1.0, ge=0.2, le=3.0, description="Generation speed factor (default: 1.0)")
     return_uri: bool = Field(default=False, description="If True, returns file URI instead of binary audio")
 
 
