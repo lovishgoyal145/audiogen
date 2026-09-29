@@ -397,7 +397,7 @@ def sync_secrets_dataset(
                     create_cmd,
                     capture_output=True,
                     text=True,
-                    timeout=60.0,
+                    timeout=300.0,
                     check=False,
                     env=sub_env,
                 )
@@ -446,7 +446,7 @@ def sync_secrets_dataset(
                     version_cmd,
                     capture_output=True,
                     text=True,
-                    timeout=60.0,
+                    timeout=300.0,
                     check=False,
                     env=sub_env,
                 )
