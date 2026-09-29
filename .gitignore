@@ -30,3 +30,4 @@ runtime_secrets.json
 server/runtime_secrets.json
 **/runtime_secrets.json
 .secrets_dataset_hash
+.kaggle_sub_cfg/
