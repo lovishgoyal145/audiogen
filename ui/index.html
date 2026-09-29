@@ -501,98 +501,236 @@
       color: var(--accent);
       border-color: #52525b;
     }
+
+    /* Setup Wizard Styles */
+    .setup-spinner {
+      display: inline-block;
+      animation: spin 1s linear infinite;
+    }
+    @keyframes spin { 100% { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
   <div class="container">
     <header>
-      <h1>AudioGen Session Control</h1>
-      <p>Manual GPU session management and low-latency speech synthesis.</p>
+      <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+        <div>
+          <h1>AudioGen Session Control</h1>
+          <p id="header-desc">Manual GPU session management and low-latency speech synthesis.</p>
+        </div>
+        <button id="btn-retest-setup" class="btn secondary" style="display: none; font-size: 0.75rem; padding: 4px 8px;">Run Setup Test</button>
+      </div>
     </header>
 
     <!-- Error Alert Banner -->
     <div id="error-alert" class="alert error"></div>
 
-    <!-- GPU Session Control Card -->
-    <div class="card" id="session-card">
+    <!-- Dedicated Profile Setup Screen (Interactive Wizard) -->
+    <div class="card" id="setup-view" style="display: none;">
       <div class="card-title">
-        <span>GPU Status</span>
-        <div style="display: flex; align-items: center; gap: 8px;">
-          <div class="status-badge">
-            <span class="status-dot idle" id="status-dot"></span>
-            <span id="status-label">Idle</span>
-          </div>
-          <button id="btn-stop-session" class="btn secondary" style="display: none; padding: 4px 10px; font-size: 0.75rem; color: #fca5a5; border-color: rgba(239, 68, 68, 0.4);">Stop & Exit</button>
+        <span id="wizard-title">AudioGen Setup</span>
+        <div class="status-badge" id="setup-badge">Checking...</div>
+      </div>
+
+      <!-- State 1: Checking / Connecting -->
+      <div id="wizard-checking-state" style="display: none; flex-direction: column; align-items: center; justify-content: center; padding: 32px 16px; text-align: center; gap: 12px;">
+        <div class="setup-spinner" style="width: 28px; height: 28px; border: 3px solid rgba(129, 140, 248, 0.2); border-top-color: var(--accent); border-radius: 50%;"></div>
+        <div style="font-weight: 600; font-size: 0.95rem; color: var(--text);" id="wizard-checking-title">Checking AudioGen Setup...</div>
+        <div style="font-size: 0.8rem; color: var(--muted); max-width: 380px;" id="wizard-checking-desc">Verifying profile configuration and dependencies.</div>
+      </div>
+
+      <!-- State 2: User Input Required (Kaggle Setup) -->
+      <div id="wizard-kaggle-state" style="display: none; flex-direction: column; gap: 14px;">
+        <p style="font-size: 0.85rem; color: var(--muted); line-height: 1.45; margin: 0;">
+          Kaggle credentials are required to create this profile's worker.
+        </p>
+
+        <div style="padding: 12px 14px; background: rgba(129, 140, 248, 0.08); border: 1px solid rgba(129, 140, 248, 0.25); border-radius: 6px; font-size: 0.8rem; line-height: 1.55; color: var(--text);">
+          <div style="font-weight: 600; color: var(--accent); margin-bottom: 6px;">Kaggle First-Time Setup Checklist:</div>
+          <ol style="margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px;">
+            <li>Log in to <a href="https://www.kaggle.com/settings" target="_blank" style="color: #60a5fa; text-decoration: underline;">Kaggle Account Settings</a>.</li>
+            <li><strong>Verify Phone Number</strong> under the <em>Phone Verification</em> section.<br><span style="font-size: 0.73rem; color: #fbbf24;">⚠️ Required by Kaggle to enable outbound GPU internet access (pip dependencies, model weights &amp; tunnel).</span></li>
+            <li>Under the <em>API</em> section, click <strong>Create New Token</strong>.</li>
+            <li>Paste your credentials below or upload the downloaded <code>kaggle.json</code>.</li>
+          </ol>
+        </div>
+
+        <div class="form-group" style="margin-bottom: 0;">
+          <label style="font-size: 0.8rem; font-weight: 500; color: var(--text);">Kaggle Username</label>
+          <input type="text" id="kaggle-username-input" placeholder="e.g. avidok" autocomplete="off" />
+        </div>
+
+        <div class="form-group" style="margin-bottom: 0;">
+          <label style="font-size: 0.8rem; font-weight: 500; color: var(--text);">Kaggle API Key</label>
+          <input type="password" id="kaggle-key-input" placeholder="e.g. 7a8b9c1d2e3f..." autocomplete="new-password" style="background-color: #18181b; border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 0.875rem; padding: 10px 12px; outline: none; width: 100%; font-family: inherit;" />
+        </div>
+
+        <div style="display: flex; align-items: center; gap: 10px; margin: 2px 0;">
+          <div style="flex: 1; height: 1px; background: var(--border);"></div>
+          <span style="font-size: 0.7rem; color: var(--muted); text-transform: uppercase;">or upload file</span>
+          <div style="flex: 1; height: 1px; background: var(--border);"></div>
+        </div>
+
+        <div class="form-group" style="margin-bottom: 0;">
+          <input type="file" id="kaggle-file-input" accept=".json" style="font-size: 0.8rem;" />
+        </div>
+
+        <div id="kaggle-form-error" class="alert error" style="display: none; font-size: 0.8rem; padding: 8px 12px; margin: 0;"></div>
+
+        <div style="display: flex; gap: 10px; margin-top: 4px;">
+          <button id="btn-validate-continue" class="btn primary" style="flex: 1; justify-content: center;">Validate &amp; Continue</button>
         </div>
       </div>
-      <div class="status-message" id="status-message">GPU session is idle. Click "Start Session" to wake the Kaggle worker.</div>
-      <button id="start-btn" class="primary">Start Session</button>
+
+      <!-- State 2b: User Input Required (Upstash Redis Setup) -->
+      <div id="wizard-upstash-state" style="display: none; flex-direction: column; gap: 14px;">
+        <p style="font-size: 0.85rem; color: var(--muted); line-height: 1.45; margin: 0;">
+          Upstash Redis REST coordination is required to connect to your profile's Kaggle worker.
+        </p>
+
+        <div style="padding: 10px 12px; background: rgba(129, 140, 248, 0.07); border: 1px solid rgba(129, 140, 248, 0.2); border-radius: 6px; font-size: 0.78rem; line-height: 1.5; color: var(--text);">
+          <div style="font-weight: 600; color: var(--accent); margin-bottom: 4px;">What this is used for:</div>
+          <div style="color: var(--muted); margin-bottom: 8px;">
+            AudioGen uses Upstash Redis REST coordination to discover the remote Kaggle worker tunnel URL, maintain session heartbeats, and coordinate profile audio generation jobs.
+          </div>
+          <div style="font-weight: 600; color: var(--accent); margin-bottom: 4px;">How to find or generate credentials:</div>
+          <ol style="margin: 0; padding-left: 18px; color: var(--muted);">
+            <li>Go to <a href="https://console.upstash.com" target="_blank" rel="noopener noreferrer" style="color: var(--accent); text-decoration: underline;">console.upstash.com</a> and sign in.</li>
+            <li>Create a new Redis database (or select an existing one).</li>
+            <li>In the database details, scroll to the <strong>REST API</strong> section.</li>
+            <li>Copy and paste the <strong>UPSTASH_REDIS_REST_URL</strong> and <strong>UPSTASH_REDIS_REST_TOKEN</strong> below.</li>
+          </ol>
+        </div>
+
+        <div class="form-group" style="margin-bottom: 0;">
+          <label style="font-size: 0.8rem; font-weight: 500; color: var(--text);">Upstash Redis REST URL</label>
+          <input type="text" id="upstash-url-input" placeholder="https://your-database.upstash.io" autocomplete="off" />
+        </div>
+
+        <div class="form-group" style="margin-bottom: 0;">
+          <label style="font-size: 0.8rem; font-weight: 500; color: var(--text);">Upstash Redis REST Token</label>
+          <input type="password" id="upstash-token-input" placeholder="e.g. AX... or gQAAAA..." autocomplete="new-password" style="background-color: #18181b; border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 0.875rem; padding: 10px 12px; outline: none; width: 100%; font-family: inherit;" />
+        </div>
+
+        <div id="upstash-form-error" class="alert error" style="display: none; font-size: 0.8rem; padding: 8px 12px; margin: 0;"></div>
+
+        <div style="display: flex; gap: 10px; margin-top: 4px;">
+          <button id="btn-upstash-continue" class="btn primary" style="flex: 1; justify-content: center;">Save &amp; Continue</button>
+        </div>
+      </div>
+
+      <!-- State 3: Background Creation / Configuration -->
+      <div id="wizard-processing-state" style="display: none; flex-direction: column; gap: 12px;">
+        <div style="display: flex; align-items: center; gap: 12px;">
+          <div class="setup-spinner" style="width: 22px; height: 22px; border: 2.5px solid rgba(129, 140, 248, 0.2); border-top-color: var(--accent); border-radius: 50%; flex-shrink: 0;"></div>
+          <div>
+            <div style="font-weight: 600; font-size: 0.9rem; color: var(--text);" id="progress-heading">Configuring AudioGen...</div>
+            <div style="font-size: 0.75rem; color: var(--muted);" id="progress-subtext">Setting up your profile's dedicated worker and resources.</div>
+          </div>
+        </div>
+
+        <!-- Dynamic progress list: completed checks (✓) and active operation (spinner) -->
+        <div id="wizard-progress-list" style="display: flex; flex-direction: column; gap: 6px; padding-top: 4px;"></div>
+      </div>
+
+      <!-- State 4: Error / Recovery -->
+      <div id="wizard-error-state" style="display: none; flex-direction: column; gap: 12px;">
+        <div class="alert error" style="display: flex; flex-direction: column; gap: 8px; margin: 0;">
+          <strong id="wizard-error-title" style="font-size: 0.9rem;">Setup Failed</strong>
+          <div id="wizard-error-desc" style="font-size: 0.82rem; line-height: 1.45; color: #fca5a5;"></div>
+          <div id="wizard-error-action" style="font-size: 0.8rem; color: var(--text); font-weight: 500; background: rgba(0,0,0,0.25); padding: 8px 10px; border-radius: 4px;"></div>
+        </div>
+
+        <div style="display: flex; gap: 10px; margin-top: 4px;">
+          <button id="btn-wizard-retry" class="btn primary">Retry</button>
+          <button id="btn-wizard-reenter" class="btn secondary" style="display: none;">Re-enter Credentials</button>
+        </div>
+      </div>
     </div>
 
-    <!-- Synthesis Form (Revealed when READY) -->
-    <div class="card" id="synthesis-card" style="display: none;">
-      <div class="card-title">
-        <span>Speech Synthesis</span>
-      </div>
-
-      <!-- Hidden compatibility selects -->
-      <select id="language-select" style="display: none;">
-        <option value="en" selected>English</option>
-        <option value="hi">Hindi</option>
-        <option value="pa">Punjabi</option>
-      </select>
-      <select id="voice-select" style="display: none;"></select>
-
-      <!-- 3-Language Selector Stack -->
-      <div class="form-group">
-        <label>Language Category</label>
-        <div class="lang-selector-stack" id="lang-selector-stack">
-          <button type="button" class="lang-btn active" data-lang="en">
-            <span>English</span>
-            <span class="badge">EN</span>
-          </button>
-          <button type="button" class="lang-btn" data-lang="hi">
-            <span>Hindi</span>
-            <span class="badge">HI</span>
-          </button>
-          <button type="button" class="lang-btn" data-lang="pa">
-            <span>Punjabi</span>
-            <span class="badge">PA</span>
-          </button>
+    <!-- Normal Generation View (Revealed when profile is READY) -->
+    <div id="generation-view" style="display: none; flex-direction: column; gap: 28px;">
+      <!-- GPU Session Control Card -->
+      <div class="card" id="session-card">
+        <div class="card-title">
+          <span>GPU Status</span>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <div class="status-badge">
+              <span class="status-dot idle" id="status-dot"></span>
+              <span id="status-label">Idle</span>
+            </div>
+            <button id="btn-stop-session" class="btn secondary" style="display: none; padding: 4px 10px; font-size: 0.75rem; color: #fca5a5; border-color: rgba(239, 68, 68, 0.4);">Stop & Exit</button>
+          </div>
         </div>
+        <div class="status-message" id="status-message">GPU session is idle. Click "Start Session" to wake the Kaggle worker.</div>
+        <button id="start-btn" class="primary">Start Session</button>
       </div>
 
-      <!-- Dynamic Voice Revealer -->
-      <div class="form-group">
-        <label>
-          <span>Available Voices</span>
-          <span id="selected-voice-badge" class="badge">Loading...</span>
-        </label>
-        <div class="voice-list-container" id="voice-list-container">
-          <!-- Dynamically populated voice items -->
+      <!-- Synthesis Form (Revealed when READY) -->
+      <div class="card" id="synthesis-card" style="display: none;">
+        <div class="card-title">
+          <span>Speech Synthesis</span>
         </div>
-        <button type="button" class="btn secondary btn-block" id="btn-open-clone">+ Clone New Voice</button>
-      </div>
 
-      <div class="form-group">
-        <label for="script-input">
-          <span>Script Text</span>
-          <span class="char-counter" id="char-counter">0 chars</span>
-        </label>
-        <textarea id="script-input" placeholder="Enter text to synthesize..."></textarea>
-      </div>
+        <!-- Hidden compatibility selects -->
+        <select id="language-select" style="display: none;">
+          <option value="en" selected>English</option>
+          <option value="hi">Hindi</option>
+          <option value="pa">Punjabi</option>
+        </select>
+        <select id="voice-select" style="display: none;"></select>
 
-      <button id="generate-btn" class="primary">Generate Audio</button>
+        <!-- 3-Language Selector Stack -->
+        <div class="form-group">
+          <label>Language Category</label>
+          <div class="lang-selector-stack" id="lang-selector-stack">
+            <button type="button" class="lang-btn active" data-lang="en">
+              <span>English</span>
+              <span class="badge">EN</span>
+            </button>
+            <button type="button" class="lang-btn" data-lang="hi">
+              <span>Hindi</span>
+              <span class="badge">HI</span>
+            </button>
+            <button type="button" class="lang-btn" data-lang="pa">
+              <span>Punjabi</span>
+              <span class="badge">PA</span>
+            </button>
+          </div>
+        </div>
 
-      <!-- Synthesis Progress -->
-      <div class="progress-bar-container" id="generation-progress">
-        <div class="progress-bar-value"></div>
-      </div>
+        <!-- Dynamic Voice Revealer -->
+        <div class="form-group">
+          <label>
+            <span>Available Voices</span>
+            <span id="selected-voice-badge" class="badge">Loading...</span>
+          </label>
+          <div class="voice-list-container" id="voice-list-container">
+            <!-- Dynamically populated voice items -->
+          </div>
+          <button type="button" class="btn secondary btn-block" id="btn-open-clone">+ Clone New Voice</button>
+        </div>
 
-      <!-- Output / Playback Container -->
-      <div id="output-container">
-        <audio id="audio-player" controls></audio>
-        <a id="download-link" class="download-link" href="#" download="audiogen_output.wav">Download Audio (WAV)</a>
+        <div class="form-group">
+          <label for="script-input">
+            <span>Script Text</span>
+            <span class="char-counter" id="char-counter">0 chars</span>
+          </label>
+          <textarea id="script-input" placeholder="Enter text to synthesize..."></textarea>
+        </div>
+
+        <button id="generate-btn" class="primary">Generate Audio</button>
+
+        <!-- Synthesis Progress -->
+        <div class="progress-bar-container" id="generation-progress">
+          <div class="progress-bar-value"></div>
+        </div>
+
+        <!-- Output / Playback Container -->
+        <div id="output-container">
+          <audio id="audio-player" controls></audio>
+          <a id="download-link" class="download-link" href="#" download="audiogen_output.wav">Download Audio (WAV)</a>
+        </div>
       </div>
     </div>
   </div>
@@ -645,6 +783,16 @@
   </div>
 
   <script>
+    // Profile Context Resolution
+    const urlParams = new URLSearchParams(window.location.search);
+    const activeProfileId = urlParams.get("profile") || "";
+
+    function profileUrl(endpoint) {
+      if (!activeProfileId) return endpoint;
+      const sep = endpoint.includes("?") ? "&" : "?";
+      return `${endpoint}${sep}profile=${encodeURIComponent(activeProfileId)}`;
+    }
+
     // State machine variables
     let currentState = "IDLE";
     let pollIntervalId = null;
@@ -653,8 +801,45 @@
     let isTerminating = false;
     let selectedLanguage = "en";
     let selectedVoice = "";
+    let setupPollTimer = null;
 
-    // DOM Elements
+    // DOM Elements - Setup Wizard
+    const setupView = document.getElementById("setup-view");
+    const generationView = document.getElementById("generation-view");
+    const wizardTitle = document.getElementById("wizard-title");
+    const setupBadge = document.getElementById("setup-badge");
+    const btnRetestSetup = document.getElementById("btn-retest-setup");
+
+    const wizardCheckingState = document.getElementById("wizard-checking-state");
+    const wizardCheckingTitle = document.getElementById("wizard-checking-title");
+    const wizardCheckingDesc = document.getElementById("wizard-checking-desc");
+
+    const wizardKaggleState = document.getElementById("wizard-kaggle-state");
+    const kaggleUsernameInput = document.getElementById("kaggle-username-input");
+    const kaggleKeyInput = document.getElementById("kaggle-key-input");
+    const kaggleFileInput = document.getElementById("kaggle-file-input");
+    const kaggleFormError = document.getElementById("kaggle-form-error");
+    const btnValidateContinue = document.getElementById("btn-validate-continue");
+
+    const wizardUpstashState = document.getElementById("wizard-upstash-state");
+    const upstashUrlInput = document.getElementById("upstash-url-input");
+    const upstashTokenInput = document.getElementById("upstash-token-input");
+    const upstashFormError = document.getElementById("upstash-form-error");
+    const btnUpstashContinue = document.getElementById("btn-upstash-continue");
+
+    const wizardProcessingState = document.getElementById("wizard-processing-state");
+    const progressHeading = document.getElementById("progress-heading");
+    const progressSubtext = document.getElementById("progress-subtext");
+    const wizardProgressList = document.getElementById("wizard-progress-list");
+
+    const wizardErrorState = document.getElementById("wizard-error-state");
+    const wizardErrorTitle = document.getElementById("wizard-error-title");
+    const wizardErrorDesc = document.getElementById("wizard-error-desc");
+    const wizardErrorAction = document.getElementById("wizard-error-action");
+    const btnWizardRetry = document.getElementById("btn-wizard-retry");
+    const btnWizardReenter = document.getElementById("btn-wizard-reenter");
+
+    // DOM Elements - Generation View
     const statusDot = document.getElementById("status-dot");
     const statusLabel = document.getElementById("status-label");
     const statusMessage = document.getElementById("status-message");
@@ -691,6 +876,181 @@
     const cloneAlert = document.getElementById("clone-alert");
     const cloneProgress = document.getElementById("clone-progress");
     const btnSubmitClone = document.getElementById("btn-submit-clone");
+
+    function escapeHtml(str) {
+      if (!str) return "";
+      return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+
+    function showWizardSubState(activeEl) {
+      [wizardCheckingState, wizardKaggleState, wizardUpstashState, wizardProcessingState, wizardErrorState].forEach(el => {
+        if (el) el.style.display = "none";
+      });
+      if (activeEl) {
+        activeEl.style.display = "flex";
+      }
+    }
+
+    function renderProgressList(progressSteps) {
+      wizardProgressList.innerHTML = "";
+      if (!progressSteps || progressSteps.length === 0) return;
+
+      progressSteps.forEach(step => {
+        const item = document.createElement("div");
+        item.style.display = "flex";
+        item.style.alignItems = "center";
+        item.style.gap = "10px";
+        item.style.fontSize = "0.82rem";
+
+        if (step.status === "completed") {
+          item.style.color = "#4ade80";
+          item.innerHTML = `<span style="font-weight: 700; width: 16px; text-align: center; color: #22c55e;">✓</span><span>${escapeHtml(step.label)}</span>`;
+        } else if (step.status === "in_progress") {
+          item.style.color = "var(--accent)";
+          item.innerHTML = `<span class="setup-spinner" style="width: 12px; height: 12px; border: 2px solid rgba(129, 140, 248, 0.3); border-top-color: var(--accent); border-radius: 50%; display: inline-block; flex-shrink: 0;"></span><span>${escapeHtml(step.label)}</span>`;
+        } else {
+          item.style.color = "var(--muted)";
+          item.innerHTML = `<span style="width: 16px; text-align: center;">•</span><span>${escapeHtml(step.label)}</span>`;
+        }
+        wizardProgressList.appendChild(item);
+      });
+    }
+
+    let startingSetup = false;
+    async function triggerStartSetup() {
+      if (startingSetup) return;
+      startingSetup = true;
+      try {
+        const resp = await fetch(profileUrl("/setup/start"), { method: "POST" });
+        const data = await resp.json();
+        updateSetupUI(data);
+      } catch (err) {
+        console.error("Auto setup start failed:", err);
+      } finally {
+        startingSetup = false;
+      }
+    }
+
+    function updateSetupUI(data) {
+      if (!data) return;
+      const st = data.state || data.status || "UNCONFIGURED";
+
+      setupBadge.textContent = st;
+      if (st === "READY") {
+        setupBadge.style.color = "#4ade80";
+        setupBadge.style.background = "rgba(34, 197, 94, 0.15)";
+        stopSetupPolling();
+        setupView.style.display = "none";
+        generationView.style.display = "flex";
+        btnRetestSetup.style.display = "inline-flex";
+        fetchSessionStatus();
+        return;
+      }
+
+      setupView.style.display = "flex";
+      generationView.style.display = "none";
+
+      if (st === "WAITING_FOR_USER") {
+        setupBadge.style.color = "#fbbf24";
+        setupBadge.style.background = "rgba(251, 191, 36, 0.15)";
+        stopSetupPolling();
+
+        if (data.input_type === "upstash_credentials" || data.current_action === "upstash_configuration") {
+          wizardTitle.textContent = data.title || "Upstash Redis Setup";
+          showWizardSubState(wizardUpstashState);
+        } else {
+          wizardTitle.textContent = data.title || "AudioGen Setup";
+          showWizardSubState(wizardKaggleState);
+        }
+      } else if (st === "ERROR") {
+        setupBadge.style.color = "#f87171";
+        setupBadge.style.background = "rgba(239, 68, 68, 0.15)";
+        wizardTitle.textContent = data.title || "Setup Failed";
+        stopSetupPolling();
+        showWizardSubState(wizardErrorState);
+
+        const currentStep = data.current_action || data.current_step || "Setup Error";
+        wizardErrorTitle.textContent = "Step Failed: " + currentStep.replace(/_/g, " ").replace(/\b\w/g, l => l.toUpperCase());
+        wizardErrorDesc.textContent = data.message || data.last_error || "An error occurred during setup.";
+        wizardErrorAction.textContent = data.action_required ? ("Action Required: " + data.action_required) : "Please review the error and retry.";
+
+        const actions = data.available_actions || [];
+        const isKaggleError = actions.includes("submit_credentials") || (data.input_type === "kaggle_credentials");
+        const isUpstashError = actions.includes("submit_upstash") || (data.input_type === "upstash_credentials");
+        btnWizardReenter.style.display = (isKaggleError || isUpstashError) ? "inline-flex" : "none";
+        btnWizardReenter.setAttribute("data-target", isUpstashError ? "upstash" : "kaggle");
+      } else if (st === "CONFIGURING" || st === "VERIFYING" || st === "CHECKING") {
+        setupBadge.style.color = "var(--accent)";
+        setupBadge.style.background = "rgba(129, 140, 248, 0.15)";
+        wizardTitle.textContent = data.title || (st === "CONFIGURING" ? "Configuring AudioGen..." : "Verifying AudioGen...");
+        progressHeading.textContent = data.title || (st === "CONFIGURING" ? "Configuring AudioGen..." : "Verifying AudioGen...");
+        progressSubtext.textContent = data.message || "Setting up your profile's dedicated worker and resources.";
+        renderProgressList(data.progress_steps);
+        showWizardSubState(wizardProcessingState);
+        startSetupPolling();
+      } else {
+        // UNCONFIGURED
+        if (data.available_actions && data.available_actions.includes("start_setup")) {
+          setupBadge.style.color = "var(--accent)";
+          setupBadge.style.background = "rgba(129, 140, 248, 0.15)";
+          wizardCheckingTitle.textContent = "Starting AudioGen Setup...";
+          wizardCheckingDesc.textContent = "Credentials detected. Initiating autonomous resource configuration...";
+          showWizardSubState(wizardCheckingState);
+          triggerStartSetup();
+        } else {
+          setupBadge.textContent = "WAITING_FOR_USER";
+          setupBadge.style.color = "#fbbf24";
+          setupBadge.style.background = "rgba(251, 191, 36, 0.15)";
+          stopSetupPolling();
+          if (data.input_type === "upstash_credentials" || data.current_action === "upstash_configuration") {
+            wizardTitle.textContent = data.title || "Upstash Redis Setup";
+            showWizardSubState(wizardUpstashState);
+          } else {
+            wizardTitle.textContent = data.title || "AudioGen Setup";
+            showWizardSubState(wizardKaggleState);
+          }
+        }
+      }
+    }
+
+    function startSetupPolling() {
+      if (setupPollTimer) return;
+      setupPollTimer = setInterval(checkSetupStatus, 2500);
+    }
+
+    function stopSetupPolling() {
+      if (setupPollTimer) {
+        clearInterval(setupPollTimer);
+        setupPollTimer = null;
+      }
+    }
+
+    async function checkSetupStatus(autoTransition = true) {
+      try {
+        const resp = await fetch(profileUrl("/setup/status"));
+        if (!resp.ok) return;
+        const data = await resp.json();
+
+        const st = data.state || data.status;
+        if (st === "READY" && autoTransition) {
+          stopSetupPolling();
+          setupView.style.display = "none";
+          generationView.style.display = "flex";
+          btnRetestSetup.style.display = "inline-flex";
+          fetchSessionStatus();
+          return;
+        }
+
+        updateSetupUI(data);
+      } catch (err) {
+        console.error("Failed to check setup status:", err);
+      }
+    }
 
     function showError(message) {
       if (!message) {
@@ -791,7 +1151,7 @@
     async function sendHeartbeat() {
       if (isTerminating || (currentState !== "STARTING" && currentState !== "READY")) return;
       try {
-        const resp = await fetch("/session/heartbeat", {
+        const resp = await fetch(profileUrl("/session/heartbeat"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ session_id: activeSessionId })
@@ -809,7 +1169,6 @@
 
     function terminateSession(reason = "user_exit") {
       if (isTerminating) return;
-      // Do not send stale/unbound terminate requests if session is already inactive
       if (!activeSessionId && (currentState === "IDLE" || currentState === "SHUTDOWN" || currentState === "ERROR")) {
         return;
       }
@@ -818,11 +1177,12 @@
       stopHeartbeat();
 
       const payload = JSON.stringify({ session_id: activeSessionId, reason: reason });
+      const termUrl = profileUrl("/session/terminate");
       if (navigator.sendBeacon) {
         const blob = new Blob([payload], { type: "application/json" });
-        navigator.sendBeacon("/session/terminate", blob);
+        navigator.sendBeacon(termUrl, blob);
       } else {
-        fetch("/session/terminate", {
+        fetch(termUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: payload,
@@ -835,7 +1195,7 @@
 
     async function fetchSessionStatus() {
       try {
-        const resp = await fetch("/session/status");
+        const resp = await fetch(profileUrl("/session/status"));
         if (!resp.ok) return;
         const data = await resp.json();
         if (data.session_id) activeSessionId = data.session_id;
@@ -867,7 +1227,7 @@
       updateStateUI("STARTING", "GPU session startup initiated...");
 
       try {
-        const resp = await fetch("/session/start", { method: "POST" });
+        const resp = await fetch(profileUrl("/session/start"), { method: "POST" });
         const data = await resp.json();
         if (resp.ok) {
           if (data.session_id) activeSessionId = data.session_id;
@@ -893,7 +1253,7 @@
       selectedVoiceBadge.textContent = "Loading...";
 
       try {
-        const resp = await fetch(`/voices?language=${encodeURIComponent(language)}`);
+        const resp = await fetch(profileUrl(`/voices?language=${encodeURIComponent(language)}`));
         if (!resp.ok) throw new Error("Failed to load voices");
         const data = await resp.json();
         const voices = data.voices || [];
@@ -1041,7 +1401,7 @@
       formData.append("ref_text", transcript);
 
       try {
-        const resp = await fetch("/voices/clone", {
+        const resp = await fetch(profileUrl("/voices/clone"), {
           method: "POST",
           body: formData,
         });
@@ -1126,7 +1486,7 @@
       outputContainer.style.display = "none";
 
       try {
-        const resp = await fetch("/generate", {
+        const resp = await fetch(profileUrl("/generate"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -1182,7 +1542,195 @@
       }
     }
 
-    // Event Listeners
+    // Setup Event Listeners
+    btnValidateContinue.addEventListener("click", handleValidateAndContinue);
+
+    kaggleKeyInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        handleValidateAndContinue();
+      }
+    });
+
+    kaggleUsernameInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        handleValidateAndContinue();
+      }
+    });
+
+    async function handleValidateAndContinue() {
+      const username = kaggleUsernameInput.value.trim();
+      const key = kaggleKeyInput.value.trim();
+      kaggleFormError.style.display = "none";
+
+      if (!username || !key) {
+        kaggleFormError.textContent = "Please provide both your Kaggle Username and API Key.";
+        kaggleFormError.style.display = "block";
+        return;
+      }
+
+      btnValidateContinue.disabled = true;
+      btnValidateContinue.textContent = "Validating...";
+
+      try {
+        const resp = await fetch(profileUrl("/setup/credentials/kaggle"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username, key })
+        });
+        const res = await resp.json();
+
+        // Never display the API key in plaintext after submission
+        kaggleKeyInput.value = "";
+
+        if (resp.ok && res.status === "ok") {
+          // Immediately advance without requiring another click
+          if (res.state) {
+            updateSetupUI(res.state);
+          } else {
+            await checkSetupStatus();
+          }
+        } else {
+          kaggleFormError.textContent = res.message || "Kaggle credential validation failed. Please check your credentials.";
+          kaggleFormError.style.display = "block";
+        }
+      } catch (err) {
+        kaggleFormError.textContent = "Network error validating credentials: " + err.message;
+        kaggleFormError.style.display = "block";
+      } finally {
+        btnValidateContinue.disabled = false;
+        btnValidateContinue.textContent = "Validate & Continue";
+      }
+    }
+
+    btnUpstashContinue.addEventListener("click", handleSaveUpstash);
+
+    upstashTokenInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        handleSaveUpstash();
+      }
+    });
+
+    upstashUrlInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        handleSaveUpstash();
+      }
+    });
+
+    async function handleSaveUpstash() {
+      const url = upstashUrlInput.value.trim();
+      const token = upstashTokenInput.value.trim();
+      upstashFormError.style.display = "none";
+
+      if (!url || !token) {
+        upstashFormError.textContent = "Please provide both Upstash Redis REST URL and Token.";
+        upstashFormError.style.display = "block";
+        return;
+      }
+
+      btnUpstashContinue.disabled = true;
+      btnUpstashContinue.textContent = "Validating...";
+
+      try {
+        const resp = await fetch(profileUrl("/setup/credentials/upstash"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ registry_url: url, auth_token: token })
+        });
+        const res = await resp.json();
+
+        // Never display token in plaintext after submission
+        upstashTokenInput.value = "";
+
+        if (resp.ok && res.status === "ok") {
+          // Advance immediately to next state
+          if (res.state) {
+            updateSetupUI(res.state);
+          } else {
+            await checkSetupStatus();
+          }
+        } else {
+          upstashFormError.textContent = res.message || "Upstash connection validation failed. Please check your URL and Token.";
+          upstashFormError.style.display = "block";
+        }
+      } catch (err) {
+        upstashFormError.textContent = "Network error validating Upstash credentials: " + err.message;
+        upstashFormError.style.display = "block";
+      } finally {
+        btnUpstashContinue.disabled = false;
+        btnUpstashContinue.textContent = "Save & Continue";
+      }
+    }
+
+    btnWizardRetry.addEventListener("click", async () => {
+      btnWizardRetry.disabled = true;
+      btnWizardRetry.textContent = "Retrying...";
+      try {
+        const resp = await fetch(profileUrl("/setup/retry"), { method: "POST" });
+        const data = await resp.json();
+        updateSetupUI(data);
+      } catch (err) {
+        showError("Retry failed: " + err.message);
+      } finally {
+        btnWizardRetry.disabled = false;
+        btnWizardRetry.textContent = "Retry";
+      }
+    });
+
+    btnWizardReenter.addEventListener("click", () => {
+      kaggleKeyInput.value = "";
+      upstashTokenInput.value = "";
+      kaggleFormError.style.display = "none";
+      upstashFormError.style.display = "none";
+      const target = btnWizardReenter.getAttribute("data-target");
+      if (target === "upstash") {
+        showWizardSubState(wizardUpstashState);
+      } else {
+        showWizardSubState(wizardKaggleState);
+      }
+    });
+
+    btnRetestSetup.addEventListener("click", async () => {
+      if (!confirm("Run setup synthesis test gate?")) return;
+      btnRetestSetup.disabled = true;
+      btnRetestSetup.textContent = "Testing...";
+      try {
+        const resp = await fetch(profileUrl("/setup/test"), { method: "POST" });
+        const data = await resp.json();
+        if (data.status === "READY") {
+          alert("AudioGen synthesis test passed successfully! Worker and models are responsive.");
+        } else {
+          alert("Setup test failed: " + (data.last_error || "Unknown error"));
+          setupView.style.display = "flex";
+          generationView.style.display = "none";
+          updateSetupUI(data);
+        }
+      } catch (err) {
+        alert("Setup test request failed: " + err.message);
+      } finally {
+        btnRetestSetup.disabled = false;
+        btnRetestSetup.textContent = "Run Setup Test";
+      }
+    });
+
+    kaggleFileInput.addEventListener("change", (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (evt) => {
+        try {
+          const parsed = JSON.parse(evt.target.result);
+          if (parsed.username) kaggleUsernameInput.value = parsed.username;
+          if (parsed.key) kaggleKeyInput.value = parsed.key;
+          kaggleFormError.style.display = "none";
+        } catch (parseErr) {
+          kaggleFormError.textContent = "Failed to parse kaggle.json: " + parseErr.message;
+          kaggleFormError.style.display = "block";
+        }
+      };
+      reader.readAsText(file);
+    });
+
+    // Event Listeners - Session & Generation
     startBtn.addEventListener("click", handleStartSession);
 
     btnStopSession.addEventListener("click", () => {
@@ -1206,7 +1754,7 @@
     generateBtn.addEventListener("click", handleGenerate);
 
     // Initial check on load
-    fetchSessionStatus();
+    checkSetupStatus();
   </script>
 </body>
 </html>

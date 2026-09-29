@@ -150,6 +150,8 @@ def _kaggle_push(
     kernel_slug: Optional[str] = None,
     stage_dir: Optional[Union[str, Path]] = None,
     kaggle_cmd: Optional[List[str]] = None,
+    secrets_cache_dir: Optional[Path] = None,
+    dataset_slug_override: Optional[str] = None,
 ) -> None:
     """Invoke `kaggle kernels push`.
 
@@ -161,6 +163,8 @@ def _kaggle_push(
         stage_dir: Directory containing kernel metadata and notebook to push.
                    Defaults to DEFAULT_STAGE_DIR (server directory).
         kaggle_cmd: Optional binary / command override for Kaggle CLI (e.g. ['kaggle']).
+        secrets_cache_dir: Optional directory for .secrets_dataset_hash.
+        dataset_slug_override: Optional pre-synced dataset slug override.
 
     Raises:
         KagglePushError: If the Kaggle CLI is missing, times out, or fails.
@@ -179,23 +183,40 @@ def _kaggle_push(
     created_temp_meta = False
 
     try:
-        # Check sync_secrets_dataset availability
-        if sync_secrets_dataset is None:
-            raise KagglePushError(
-                "Secret dataset synchronization utility (scripts.sync_secrets_dataset) is unavailable."
-            )
+        if dataset_slug_override:
+            dataset_slug = dataset_slug_override
+        else:
+            # Check sync_secrets_dataset availability
+            if sync_secrets_dataset is None:
+                raise KagglePushError(
+                    "Secret dataset synchronization utility (scripts.sync_secrets_dataset) is unavailable."
+                )
 
-        # Ensure private Kaggle secret dataset is synced before pushing kernel
-        try:
-            dataset_slug = sync_secrets_dataset(kaggle_cmd=kaggle_cmd)
-        except Exception as exc:
-            logger.error("Failed to synchronize Kaggle secrets dataset: %s", exc)
-            raise KagglePushError(f"Secret dataset sync failed prior to push: {exc}") from exc
+            # Ensure private Kaggle secret dataset is synced before pushing kernel
+            try:
+                if secrets_cache_dir is not None:
+                    dataset_slug = sync_secrets_dataset(kaggle_cmd=kaggle_cmd, cache_dir=secrets_cache_dir)
+                else:
+                    dataset_slug = sync_secrets_dataset(kaggle_cmd=kaggle_cmd)
+            except Exception as exc:
+                logger.error("Failed to synchronize Kaggle secrets dataset: %s", exc)
+                raise KagglePushError(f"Secret dataset sync failed prior to push: {exc}") from exc
 
         resolved_slug = _resolve_kernel_slug(kernel_slug)
+        parts = resolved_slug.split("/")
+        slug_name = parts[-1] if parts else "audiogen"
+        clean_slug_name = re.sub(r"[^a-zA-Z0-9]+", "-", slug_name).strip("-").lower()
+        if len(parts) == 2:
+            resolved_slug = f"{parts[0]}/{clean_slug_name}"
+
+        if clean_slug_name.startswith("audiogen-"):
+            kernel_title = clean_slug_name[:50]
+        else:
+            kernel_title = f"audiogen-{clean_slug_name}"[:50]
+
         meta_data = {
             "id": resolved_slug,
-            "title": "audiogen",
+            "title": kernel_title,
             "code_file": "interactive_notebook.ipynb",
             "language": "python",
             "kernel_type": "notebook",
@@ -212,13 +233,11 @@ def _kaggle_push(
                 with open(config_meta, "r", encoding="utf-8") as f:
                     tpl = json.load(f)
                 if isinstance(tpl, dict):
-                    meta_data.update(tpl)
-                    meta_data["id"] = resolved_slug
-                    if dataset_slug:
-                        cur_sources = list(meta_data.get("dataset_sources", []))
-                        if dataset_slug not in cur_sources:
-                            cur_sources.append(dataset_slug)
-                        meta_data["dataset_sources"] = cur_sources
+                    # Only inherit execution hardware / environment flags from template.
+                    # Do NOT let template overwrite profile-isolated id, title, or dataset_sources.
+                    for flag in ("language", "kernel_type", "is_private", "enable_gpu", "enable_internet"):
+                        if flag in tpl:
+                            meta_data[flag] = tpl[flag]
             except Exception as exc:
                 logger.warning("Could not read template kernel-metadata.json: %s", exc)
 
@@ -243,8 +262,11 @@ def _kaggle_push(
         except Exception as exc:
             raise KagglePushError(f"Failed to execute Kaggle push: {exc}") from exc
 
-        if proc.returncode != 0:
-            err_msg = (proc.stderr or proc.stdout or "").strip()
+        push_out = (proc.stdout or "").strip()
+        push_err = (proc.stderr or "").strip()
+        logger.info("Kaggle push result: stdout=%r stderr=%r", push_out, push_err)
+        if proc.returncode != 0 or "kernel push error" in push_out.lower():
+            err_msg = push_err or push_out
             raise KagglePushError(
                 f"Kaggle push failed with exit code {proc.returncode}: {err_msg}"
             )
@@ -345,10 +367,45 @@ def parse_kaggle_status_output(output: str) -> str:
     return "UNKNOWN"
 
 
-def resolve_read_endpoint(endpoint_url: str) -> str:
+def get_kaggle_kernel_log(
+    kernel_slug: Optional[str] = None,
+    kaggle_cmd: Optional[List[str]] = None,
+    output_dir: Optional[Path] = None,
+) -> Optional[str]:
+    """Download and return latest execution log for a kernel."""
+    cmd_base = list(kaggle_cmd) if kaggle_cmd is not None else ["kaggle"]
+    slug = _resolve_kernel_slug(kernel_slug)
+    with tempfile.TemporaryDirectory() as tmp:
+        target = Path(output_dir) if output_dir else Path(tmp)
+        target.mkdir(parents=True, exist_ok=True)
+        try:
+            subprocess.run(
+                [*cmd_base, "kernels", "output", slug, "-p", str(target)],
+                capture_output=True,
+                text=True,
+                timeout=30.0,
+                check=False,
+            )
+            for log_file in target.glob("*.log"):
+                try:
+                    return log_file.read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    return None
+
+
+def resolve_read_endpoint(endpoint_url: str, profile_id: Optional[str] = None) -> str:
     """Normalize registry read endpoint to explicit /get/tunnel_url path for Upstash Redis REST."""
     clean = endpoint_url.strip().rstrip("/")
     parsed = urlparse(clean)
+    base = f"{parsed.scheme}://{parsed.netloc}"
+    if profile_id:
+        clean_pid = profile_id.strip()
+        clean_pid = clean_pid if clean_pid.startswith("profile_") else f"profile_{clean_pid}"
+        return f"{base}/get/audiogen:{clean_pid}:tunnel_url"
+
     path = parsed.path.rstrip("/")
     if path.endswith("/set/tunnel_url"):
         new_path = path[:-len("/set/tunnel_url")] + "/get/tunnel_url"
@@ -437,6 +494,7 @@ def check_tunnel_discovery(
     registry_url: Optional[str] = None,
     health_timeout: float = 3.0,
     client: Optional[httpx.Client] = None,
+    profile_id: Optional[str] = None,
 ) -> TunnelDiscoveryResult:
     """Perform structured tunnel discovery against registry/KV and verify tunnel /health.
 
@@ -467,7 +525,7 @@ def check_tunnel_discovery(
             error=f"Invalid registry URL structure: '{target_clean}'",
         )
 
-    read_target = resolve_read_endpoint(target_clean)
+    read_target = resolve_read_endpoint(target_clean, profile_id=profile_id)
     auth_token = os.environ.get(ENV_REGISTRY_AUTH_TOKEN)
     headers = (
         {"Authorization": f"Bearer {auth_token.strip()}"}
@@ -582,6 +640,7 @@ def is_tunnel_healthy(
     registry_url: Optional[str] = None,
     health_timeout: float = 3.0,
     client: Optional[httpx.Client] = None,
+    profile_id: Optional[str] = None,
 ) -> Optional[str]:
     """Check registry/KV for a published tunnel URL and verify its /health endpoint.
 
@@ -593,6 +652,7 @@ def is_tunnel_healthy(
         registry_url=registry_url,
         health_timeout=health_timeout,
         client=client,
+        profile_id=profile_id,
     )
     if result.status == DiscoveryStatus.READY:
         return result.tunnel_url
@@ -633,9 +693,15 @@ def cancel_kaggle_kernel(
     return False
 
 
-def resolve_delete_endpoint(endpoint_url: str) -> str:
+def resolve_delete_endpoint(endpoint_url: str, profile_id: Optional[str] = None) -> str:
     clean = endpoint_url.strip().rstrip("/")
     parsed = urlparse(clean)
+    base = f"{parsed.scheme}://{parsed.netloc}"
+    if profile_id:
+        clean_pid = profile_id.strip()
+        clean_pid = clean_pid if clean_pid.startswith("profile_") else f"profile_{clean_pid}"
+        return f"{base}/del/audiogen:{clean_pid}:tunnel_url"
+
     path = parsed.path.rstrip("/")
     if path.endswith("/get/tunnel_url"):
         new_path = path[:-len("/get/tunnel_url")] + "/del/tunnel_url"
@@ -655,6 +721,7 @@ def delete_tunnel_url(
     auth_token: Optional[str] = None,
     timeout_seconds: float = 5.0,
     client: Optional[httpx.Client] = None,
+    profile_id: Optional[str] = None,
 ) -> bool:
     target = (
         endpoint_url
@@ -670,7 +737,7 @@ def delete_tunnel_url(
         if token and token.strip()
         else {}
     )
-    del_url = resolve_delete_endpoint(str(target).strip())
+    del_url = resolve_delete_endpoint(str(target).strip(), profile_id=profile_id)
     try:
         if client is not None:
             resp = client.post(del_url, headers=headers, timeout=timeout_seconds)

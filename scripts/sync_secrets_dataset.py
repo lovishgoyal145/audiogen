@@ -16,6 +16,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -60,11 +61,15 @@ class SecretSyncError(RuntimeError):
     pass
 
 
-def load_secrets_config(env_file_path: Optional[Path] = None) -> Dict[str, str]:
-    """Load and validate required secrets and credentials from .env and environment.
+def load_secrets_config(
+    env_file_path: Optional[Path] = None,
+    secrets_override: Optional[Dict[str, str]] = None,
+) -> Dict[str, str]:
+    """Load and validate required secrets and credentials from .env, environment, and overrides.
 
     Args:
         env_file_path: Optional path to .env file.
+        secrets_override: Optional explicit secret key-value overrides.
 
     Returns:
         Dictionary containing all required keys with non-empty string values.
@@ -88,6 +93,12 @@ def load_secrets_config(env_file_path: Optional[Path] = None) -> Dict[str, str]:
             if v is not None and str(v).strip():
                 env_values[k] = str(v).strip()
 
+    # Explicit overrides take highest precedence
+    if secrets_override is not None:
+        for k, v in secrets_override.items():
+            if v is not None and str(v).strip():
+                env_values[k] = str(v).strip()
+
     missing = []
     for k in REQUIRED_SECRET_KEYS + REQUIRED_AUTH_KEYS:
         val = env_values.get(k)
@@ -103,12 +114,22 @@ def load_secrets_config(env_file_path: Optional[Path] = None) -> Dict[str, str]:
 
 
 def compute_secrets_hash(config: Dict[str, str]) -> str:
-    """Compute SHA-256 digest of secret values."""
+    """Compute SHA-256 digest of secret values and codebase bundle."""
     keys_to_hash = [k for k in REQUIRED_SECRET_KEYS if k in config]
     for k in OPTIONAL_SECRET_KEYS:
         if k in config:
             keys_to_hash.append(k)
     payload = "|".join(config[k] for k in keys_to_hash)
+    # Include modification timestamps of packaged files so code updates trigger sync
+    code_marker = ""
+    for check_file in (
+        REPO_ROOT / "server" / "interactive_notebook.ipynb",
+        REPO_ROOT / "server" / "app.py",
+        REPO_ROOT / "requirements.txt",
+    ):
+        if check_file.is_file():
+            code_marker += f":{check_file.stat().st_mtime_ns}"
+    payload += code_marker
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -134,8 +155,14 @@ def stage_dataset_files(stage_dir: Path, dataset_slug: str, config: Dict[str, st
         dataset_slug: Kaggle dataset identifier (owner/audiogen-secrets).
         config: Validated secrets configuration.
     """
+    parts = dataset_slug.split("/")
+    slug_name = parts[-1] if parts else "audiogen-secrets"
+    if slug_name == "audiogen-secrets":
+        clean_title = "AudioGen Runtime Secrets"
+    else:
+        clean_title = f"AudioGen Secrets {slug_name}"[:50]
     meta = {
-        "title": "AudioGen Runtime Secrets",
+        "title": clean_title,
         "id": dataset_slug,
         "licenses": [
             {
@@ -157,12 +184,30 @@ def stage_dataset_files(stage_dir: Path, dataset_slug: str, config: Dict[str, st
     for k, v in secrets_dict.items():
         _write_secure_file(stage_dir / k, v)
 
+    # Bundle codebase archive into the dataset for zero-network execution on Kaggle
+    code_tar_path = stage_dir / "code.tar.gz"
+    try:
+        import tarfile
+        with tarfile.open(code_tar_path, "w:gz") as tar:
+            for folder in ("src", "server", "voices"):
+                src_path = REPO_ROOT / folder
+                if src_path.is_dir():
+                    tar.add(src_path, arcname=folder)
+            req = REPO_ROOT / "requirements.txt"
+            if req.is_file():
+                tar.add(req, arcname="requirements.txt")
+        logger.info("Bundled audiogen code into %s (size: %d bytes)", code_tar_path.name, code_tar_path.stat().st_size)
+    except Exception as exc:
+        logger.warning("Could not bundle code archive into dataset: %s", exc)
+
 
 def sync_secrets_dataset(
     env_file_path: Optional[Path] = None,
     kaggle_cmd: Optional[List[str]] = None,
     cache_dir: Optional[Path] = None,
     force: bool = False,
+    dataset_slug_override: Optional[str] = None,
+    secrets_override: Optional[Dict[str, str]] = None,
 ) -> str:
     """Synchronize runtime secrets to the private Kaggle dataset.
 
@@ -171,17 +216,28 @@ def sync_secrets_dataset(
         kaggle_cmd: Optional binary / command override for Kaggle CLI.
         cache_dir: Optional directory where .secrets_dataset_hash is saved.
         force: If True, upload a new version even if cached hash matches.
+        dataset_slug_override: Optional explicit dataset slug (e.g. for profile isolation).
+        secrets_override: Optional explicit secret key-value overrides.
 
     Returns:
-        Dataset slug (<KAGGLE_USERNAME>/audiogen-secrets).
+        Dataset slug (<KAGGLE_USERNAME>/audiogen-secrets or dataset_slug_override).
 
     Raises:
         ValueError: If required configuration is missing.
         SecretSyncError: If Kaggle CLI operations fail.
     """
-    config = load_secrets_config(env_file_path)
+    config = load_secrets_config(env_file_path, secrets_override=secrets_override)
     username = config["KAGGLE_USERNAME"]
-    dataset_slug = f"{username}/audiogen-secrets"
+    raw_slug = dataset_slug_override or f"{username}/audiogen-secrets"
+
+    # Normalize slug to ensure Kaggle compliance (only alphanumeric and hyphens, no underscores)
+    parts = raw_slug.split("/", 1)
+    if len(parts) == 2:
+        owner, slug_name = parts
+    else:
+        owner, slug_name = username, raw_slug
+    clean_slug_name = re.sub(r"[^a-zA-Z0-9]+", "-", slug_name).strip("-").lower()
+    dataset_slug = f"{owner}/{clean_slug_name}"
 
     cmd_base = list(kaggle_cmd) if kaggle_cmd is not None else ["kaggle"]
     executable = cmd_base[0]
@@ -201,6 +257,18 @@ def sync_secrets_dataset(
     sub_env = dict(os.environ)
     sub_env["KAGGLE_USERNAME"] = username
     sub_env["KAGGLE_KEY"] = config["KAGGLE_KEY"]
+    sub_env["KAGGLE_API_TOKEN"] = config["KAGGLE_KEY"]
+
+    # Isolate Kaggle configuration directory to prevent reading global ~/.kaggle/access_token
+    kaggle_cfg_dir = (cache_dir or REPO_ROOT) / ".kaggle_sub_cfg"
+    kaggle_cfg_dir.mkdir(parents=True, exist_ok=True)
+    kjson = kaggle_cfg_dir / "kaggle.json"
+    kjson.write_text(json.dumps({"username": username, "key": config["KAGGLE_KEY"]}), encoding="utf-8")
+    try:
+        os.chmod(kjson, 0o600)
+    except Exception:
+        pass
+    sub_env["KAGGLE_CONFIG_DIR"] = str(kaggle_cfg_dir)
 
     # Check remote dataset existence
     status_cmd = [*cmd_base, "datasets", "status", dataset_slug]
@@ -230,10 +298,40 @@ def sync_secrets_dataset(
         dataset_exists = True
     elif "404" in combined_status or "not found" in combined_status:
         dataset_exists = False
-    elif "unauthorized" in combined_status or "401" in combined_status or "403" in combined_status:
+    elif "unauthorized" in combined_status or "401" in combined_status:
         raise SecretSyncError(
-            f"Kaggle credentials unauthorized or rejected checking dataset '{dataset_slug}': {status_err or status_out}"
+            f"Kaggle credentials unauthorized checking dataset '{dataset_slug}': {status_err or status_out}"
         )
+    elif "403" in combined_status:
+        # On Kaggle's API, GetDatasetStatus returns 403 when a dataset does NOT exist yet.
+        # We verify whether credentials are valid and if the dataset exists via `kaggle datasets list --mine`.
+        list_cmd = [*cmd_base, "datasets", "list", "--mine", "-v"]
+        try:
+            list_proc = subprocess.run(
+                list_cmd,
+                capture_output=True,
+                text=True,
+                timeout=30.0,
+                check=False,
+                env=sub_env,
+            )
+        except Exception as exc:
+            raise SecretSyncError(f"Failed to verify Kaggle dataset list: {exc}") from exc
+
+        list_out = (list_proc.stdout or "").strip()
+        list_err = (list_proc.stderr or "").strip()
+        combined_list = f"{list_out} {list_err}".lower()
+
+        if list_proc.returncode == 0:
+            dataset_exists = any(dataset_slug.lower() in line.lower() for line in list_out.splitlines())
+        elif "unauthorized" in combined_list or "401" in combined_list:
+            raise SecretSyncError(
+                f"Kaggle credentials unauthorized checking dataset '{dataset_slug}': {list_err or list_out}"
+            )
+        else:
+            raise SecretSyncError(
+                f"Failed to check Kaggle dataset status for '{dataset_slug}' (exit code {list_proc.returncode}): {list_err or list_out}"
+            )
     else:
         raise SecretSyncError(
             f"Unexpected failure checking Kaggle dataset status for '{dataset_slug}' "
@@ -243,6 +341,24 @@ def sync_secrets_dataset(
     if dataset_exists and not force and cached_hash == secrets_hash:
         logger.info("Kaggle secrets dataset is up to date (hash matches). Skipping upload.")
         return dataset_slug
+
+    if dataset_exists and not force:
+        # Verify remote dataset files to ensure code.tar.gz is present
+        files_cmd = [*cmd_base, "datasets", "files", dataset_slug]
+        try:
+            files_proc = subprocess.run(
+                files_cmd,
+                capture_output=True,
+                text=True,
+                timeout=20.0,
+                check=False,
+                env=sub_env,
+            )
+            if files_proc.returncode == 0 and "code.tar.gz" not in (files_proc.stdout or ""):
+                logger.info("Remote dataset '%s' missing code.tar.gz; forcing version update.", dataset_slug)
+                force = True
+        except Exception as exc:
+            logger.debug("Failed to inspect dataset files: %s", exc)
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         stage_path = Path(tmp_dir)
@@ -263,8 +379,10 @@ def sync_secrets_dataset(
             except Exception as exc:
                 raise SecretSyncError(f"Failed to execute dataset creation: {exc}") from exc
 
-            if proc.returncode != 0:
-                err_msg = (proc.stderr or proc.stdout or "").strip()
+            create_out = (proc.stdout or "").strip()
+            create_err = (proc.stderr or "").strip()
+            if proc.returncode != 0 or "dataset creation error" in create_out.lower() or "dataset creation error" in create_err.lower():
+                err_msg = create_err or create_out
                 raise SecretSyncError(f"Failed to create Kaggle dataset '{dataset_slug}': {err_msg}")
 
             # Poll briefly for readiness

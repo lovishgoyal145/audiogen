@@ -19,17 +19,11 @@ DEFAULT_PUBLISH_TIMEOUT: Final[float] = 10.0
 
 
 def resolve_publish_endpoint(endpoint_url: str) -> str:
-    """Normalize registry publish endpoint to explicit /set/tunnel_url path for Upstash Redis REST.
-
-    Supports:
-    - Base URL: https://<id>.upstash.io -> https://<id>.upstash.io/set/tunnel_url
-    - Read key path: https://<id>.upstash.io/get/tunnel_url -> https://<id>.upstash.io/set/tunnel_url
-    - Write key path: https://<id>.upstash.io/set/tunnel_url -> https://<id>.upstash.io/set/tunnel_url
-    - Generic URL with no path -> appends /set/tunnel_url
-    """
     clean = endpoint_url.strip().rstrip("/")
     parsed = urlparse(clean)
     path = parsed.path.rstrip("/")
+    if "/set/" in path:
+        return clean
     if path.endswith("/get/tunnel_url"):
         new_path = path[:-len("/get/tunnel_url")] + "/set/tunnel_url"
         return urlunparse(parsed._replace(path=new_path))
