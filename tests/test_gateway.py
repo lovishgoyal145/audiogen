@@ -18,13 +18,16 @@ import voices.registry
 
 
 @pytest.fixture
-def test_gateway() -> SessionGateway:
+def test_gateway() -> Generator[SessionGateway, None, None]:
     """Provide an isolated SessionGateway instance configured for rapid testing."""
-    return SessionGateway(
+    gw = SessionGateway(
         poll_interval_seconds=0.01,
         startup_timeout_seconds=0.1,
         registry_url=os.environ.get("TUNNEL_REGISTRY_WEBHOOK_URL", "https://mock-registry.example.com"),
     )
+    gw.reset()
+    yield gw
+    gw.reset()
 
 
 @pytest.fixture

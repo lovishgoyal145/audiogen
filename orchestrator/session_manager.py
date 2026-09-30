@@ -18,9 +18,9 @@ import shutil
 import socket
 import struct
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Final, List, Optional, Union
+from typing import Any, Dict, Final, List, Optional, Union
 from urllib.parse import urlparse, urlunparse
 import httpx
 
@@ -126,6 +126,12 @@ TERMINAL_FAILURE_STATUSES: Final[frozenset[str]] = frozenset({
 
 class KagglePushError(RuntimeError):
     """Raised when `kaggle kernels push` fails or CLI is missing."""
+
+    pass
+
+
+class KagglePushConflictError(KagglePushError):
+    """Raised when `kaggle kernels push` fails with HTTP 409 Conflict (e.g. SaveKernel conflict)."""
 
     pass
 
@@ -270,6 +276,11 @@ def _kaggle_push(
         logger.info("Kaggle push result: stdout=%r stderr=%r", push_out, push_err)
         if proc.returncode != 0 or "kernel push error" in push_out.lower():
             err_msg = push_err or push_out
+            combined = f"{push_out} {push_err}".lower()
+            if "409" in combined or "conflict" in combined or "savekernel" in combined:
+                raise KagglePushConflictError(
+                    f"Kaggle push failed with exit code {proc.returncode}: {err_msg}"
+                )
             raise KagglePushError(
                 f"Kaggle push failed with exit code {proc.returncode}: {err_msg}"
             )
@@ -662,6 +673,88 @@ def is_tunnel_healthy(
     return None
 
 
+@dataclass
+class SessionReconciliationResult:
+    """Structured result of observing and reconciling remote session reality."""
+
+    status: str  # "READY", "INITIALIZING", "RUNNING", "FAILED", "STOPPED", "UNKNOWN"
+    tunnel_url: Optional[str] = None
+    kernel_status: Optional[str] = None
+    message: str = ""
+    can_reuse: bool = False
+    details: Dict[str, Any] = field(default_factory=dict)
+
+
+def reconcile_remote_session(
+    kernel_slug: Optional[str] = None,
+    registry_url: Optional[str] = None,
+    profile_id: Optional[str] = None,
+    health_timeout: float = 3.0,
+    client: Optional[httpx.Client] = None,
+    kaggle_cmd: Optional[List[str]] = None,
+) -> SessionReconciliationResult:
+    """Inspect real external state across tunnel registry and Kaggle kernel status.
+
+    Returns authoritative external state to guide idempotent convergence.
+    """
+    slug = _resolve_kernel_slug(kernel_slug)
+
+    # 1. First probe tunnel discovery (most authoritative for READY)
+    disc = check_tunnel_discovery(
+        registry_url=registry_url,
+        health_timeout=health_timeout,
+        client=client,
+        profile_id=profile_id,
+    )
+    if disc.status == DiscoveryStatus.READY and disc.tunnel_url:
+        return SessionReconciliationResult(
+            status="READY",
+            tunnel_url=disc.tunnel_url,
+            message=f"Discovered healthy active tunnel at {disc.tunnel_url}",
+            can_reuse=True,
+            details={"tunnel_status": disc.status.value, "tunnel_url": disc.tunnel_url},
+        )
+
+    # 2. Check Kaggle kernel execution status
+    k_status = "UNKNOWN"
+    k_err: Optional[str] = None
+    try:
+        k_status = get_kaggle_status(kernel_slug=slug, kaggle_cmd=kaggle_cmd)
+    except Exception as exc:
+        k_err = str(exc)
+
+    if k_status in ("RUNNING", "QUEUED"):
+        return SessionReconciliationResult(
+            status="INITIALIZING" if disc.status == DiscoveryStatus.NO_TUNNEL_REGISTERED else "RUNNING",
+            kernel_status=k_status,
+            tunnel_url=disc.tunnel_url,
+            message=f"Kaggle kernel '{slug}' is active ({k_status}). Awaiting ready tunnel.",
+            can_reuse=True,
+            details={
+                "kernel_status": k_status,
+                "tunnel_status": disc.status.value,
+                "tunnel_url": disc.tunnel_url,
+            },
+        )
+
+    if k_status in TERMINAL_FAILURE_STATUSES:
+        return SessionReconciliationResult(
+            status="FAILED",
+            kernel_status=k_status,
+            message=f"Kaggle kernel '{slug}' has terminated with status {k_status}.",
+            can_reuse=False,
+            details={"kernel_status": k_status, "error": k_err},
+        )
+
+    return SessionReconciliationResult(
+        status="STOPPED",
+        kernel_status=k_status,
+        message=f"No active session found for kernel '{slug}' (status: {k_status}).",
+        can_reuse=False,
+        details={"kernel_status": k_status, "error": k_err},
+    )
+
+
 def cancel_kaggle_kernel(
     kernel_slug: Optional[str] = None,
     kaggle_cmd: Optional[List[str]] = None,
@@ -776,7 +869,10 @@ __all__ = [
     "DiscoveryStatus",
     "TunnelDiscoveryResult",
     "KagglePushError",
+    "KagglePushConflictError",
     "KaggleStatusError",
+    "SessionReconciliationResult",
+    "reconcile_remote_session",
     "_kaggle_push",
     "kaggle_push",
     "get_kaggle_status",

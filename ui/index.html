@@ -96,18 +96,18 @@
       background-color: var(--muted);
     }
 
-    .status-dot.idle { background-color: var(--muted); }
-    .status-dot.starting {
+    .status-dot.idle, .status-dot.stopped, .status-dot.shutdown { background-color: var(--muted); }
+    .status-dot.starting, .status-dot.initializing, .status-dot.recovering, .status-dot.running {
       background-color: var(--warning);
       animation: pulse 1.5s infinite;
     }
     .status-dot.ready { background-color: var(--success); }
-    .status-dot.error { background-color: var(--danger); }
-    .status-dot.terminating {
+    .status-dot.error, .status-dot.failed { background-color: var(--danger); }
+    .status-dot.terminating, .status-dot.stopping {
       background-color: var(--warning);
       animation: pulse 1.5s infinite;
     }
-    .status-dot.shutdown { background-color: var(--muted); }
+    .status-dot.unknown { background-color: var(--muted); }
 
     @keyframes pulse {
       0%, 100% { opacity: 1; transform: scale(1); }
@@ -1125,26 +1125,38 @@
       cloneAlert.textContent = message;
     }
 
-    function updateStateUI(state, message, sessionId) {
+    function updateStateUI(state, message, sessionId, rawData) {
       currentState = state;
       if (sessionId) activeSessionId = sessionId;
 
       // Update dot and label
-      statusDot.className = "status-dot " + state.toLowerCase();
+      statusDot.className = "status-dot " + (state ? state.toLowerCase() : "unknown");
       statusLabel.textContent = state;
 
-      if (state === "IDLE") {
-        statusMessage.textContent = message || "GPU session is idle. Click \"Start Session\" to wake the Kaggle worker.";
+      if (state === "IDLE" || state === "STOPPED" || state === "SHUTDOWN") {
+        statusMessage.textContent = message || "GPU session is idle/stopped. Click \"Start Session\" to activate the Kaggle worker.";
         startBtn.disabled = false;
-        startBtn.textContent = "Start Session";
+        startBtn.textContent = state === "SHUTDOWN" ? "Start New Session" : "Start Session";
         startBtn.style.display = "inline-flex";
         btnStopSession.style.display = "none";
         synthesisCard.style.display = "none";
         stopHeartbeat();
-      } else if (state === "STARTING") {
-        statusMessage.textContent = message || "Starting… (this can take a minute or two)";
+      } else if (state === "STARTING" || state === "INITIALIZING" || state === "RUNNING" || state === "RECOVERING") {
+        let defaultMsg = "Starting worker… (this can take a minute or two)";
+        let btnText = "Starting...";
+        if (state === "RECOVERING") {
+          defaultMsg = "Reconnecting to active Kaggle session...";
+          btnText = "Recovering...";
+        } else if (state === "INITIALIZING") {
+          defaultMsg = "Initializing environment and model weights...";
+          btnText = "Initializing...";
+        } else if (state === "RUNNING") {
+          defaultMsg = "Kaggle worker running, establishing secure tunnel...";
+          btnText = "Connecting...";
+        }
+        statusMessage.textContent = message || defaultMsg;
         startBtn.disabled = true;
-        startBtn.textContent = "Starting...";
+        startBtn.textContent = btnText;
         startBtn.style.display = "inline-flex";
         btnStopSession.style.display = "inline-flex";
         synthesisCard.style.display = "none";
@@ -1158,25 +1170,16 @@
         stopPolling();
         startHeartbeat();
         loadVoices(selectedLanguage);
-      } else if (state === "TERMINATING") {
-        statusMessage.textContent = message || "Session terminating...";
+      } else if (state === "TERMINATING" || state === "STOPPING") {
+        statusMessage.textContent = message || "Session stopping...";
         startBtn.disabled = true;
-        startBtn.textContent = "Terminating...";
+        startBtn.textContent = "Stopping...";
         startBtn.style.display = "inline-flex";
         btnStopSession.style.display = "none";
         synthesisCard.style.display = "none";
         stopPolling();
         stopHeartbeat();
-      } else if (state === "SHUTDOWN") {
-        statusMessage.textContent = message || "Session terminated. You may close this tab.";
-        startBtn.disabled = false;
-        startBtn.textContent = "Start New Session";
-        startBtn.style.display = "inline-flex";
-        btnStopSession.style.display = "none";
-        synthesisCard.style.display = "none";
-        stopPolling();
-        stopHeartbeat();
-      } else if (state === "ERROR") {
+      } else if (state === "ERROR" || state === "FAILED") {
         statusMessage.textContent = message || "An error occurred during session startup.";
         startBtn.disabled = false;
         startBtn.textContent = "Retry Session";
@@ -1185,6 +1188,14 @@
         synthesisCard.style.display = "none";
         stopPolling();
         stopHeartbeat();
+      } else {
+        // UNKNOWN or unrecognized
+        statusMessage.textContent = message || "Session status unknown. Click to synchronize.";
+        startBtn.disabled = false;
+        startBtn.textContent = "Check Status";
+        startBtn.style.display = "inline-flex";
+        btnStopSession.style.display = "none";
+        synthesisCard.style.display = "none";
       }
     }
 
@@ -1202,7 +1213,7 @@
     }
 
     async function sendHeartbeat() {
-      if (isTerminating || (currentState !== "STARTING" && currentState !== "READY")) return;
+      if (isTerminating || (currentState !== "STARTING" && currentState !== "READY" && currentState !== "RECOVERING" && currentState !== "RUNNING" && currentState !== "INITIALIZING")) return;
       try {
         const resp = await fetch(profileUrl("/session/heartbeat"), {
           method: "POST",
@@ -1222,7 +1233,7 @@
 
     function terminateSession(reason = "user_exit") {
       if (isTerminating) return;
-      if (!activeSessionId && (currentState === "IDLE" || currentState === "SHUTDOWN" || currentState === "ERROR")) {
+      if (!activeSessionId && (currentState === "IDLE" || currentState === "STOPPED" || currentState === "SHUTDOWN" || currentState === "ERROR" || currentState === "FAILED")) {
         return;
       }
       isTerminating = true;
@@ -1252,7 +1263,14 @@
         if (!resp.ok) return;
         const data = await resp.json();
         if (data.session_id) activeSessionId = data.session_id;
-        updateStateUI(data.status, data.message, data.session_id);
+        updateStateUI(data.status, data.message, data.session_id, data);
+        if (["STARTING", "INITIALIZING", "RECOVERING", "RUNNING"].includes(data.status)) {
+          startPolling();
+          startHeartbeat();
+        } else if (data.status === "READY") {
+          stopPolling();
+          startHeartbeat();
+        }
       } catch (err) {
         console.error("Error fetching session status:", err);
       }
@@ -1830,13 +1848,9 @@
       }
     });
 
-    window.addEventListener("pagehide", () => {
-      terminateSession("pagehide");
-    });
-
-    window.addEventListener("beforeunload", () => {
-      terminateSession("beforeunload");
-    });
+    // Tab/window closing must NOT terminate remote GPU sessions!
+    // GPU lifecycle is persistent; teardown occurs only via explicit user Stop button
+    // or the remote Kaggle 10-minute idle watchdog.
 
     scriptInput.addEventListener("input", () => {
       charCounter.textContent = `${scriptInput.value.length} chars`;
@@ -1844,8 +1858,9 @@
 
     generateBtn.addEventListener("click", handleGenerate);
 
-    // Initial check on load
+    // Initial check on load - query backend truth immediately
     checkSetupStatus();
+    fetchSessionStatus();
   </script>
 </body>
 </html>

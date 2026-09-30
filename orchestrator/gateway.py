@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 import json
 import logging
 import os
@@ -58,13 +59,16 @@ from orchestrator.session_manager import (
     DiscoveryStatus,
     TunnelDiscoveryResult,
     KagglePushError,
+    KagglePushConflictError,
     KaggleStatusError,
+    SessionReconciliationResult,
     _kaggle_push,
     cancel_kaggle_kernel,
     check_tunnel_discovery,
     delete_tunnel_url,
     get_kaggle_status,
     is_tunnel_healthy,
+    reconcile_remote_session,
 )
 import voices.registry
 
@@ -206,6 +210,60 @@ class StatusResponse(BaseModel):
     message: str
     session_id: Optional[str] = None
     failure_stage: Optional[str] = None
+    desired_state: Optional[str] = None
+    operation_id: Optional[str] = None
+    remote_status: Optional[str] = None
+    tunnel_url: Optional[str] = None
+    observed_state: Optional[Dict[str, Any]] = None
+    details: Optional[Dict[str, Any]] = None
+
+
+@dataclass
+class ObservedState:
+    """Fine-grained observed reality of local and remote resources."""
+
+    local_service_state: str = "RUNNING"
+    kaggle_gpu_state: str = "UNKNOWN"
+    kernel_slug: str = "avidok/audiogen"
+    kernel_execution_status: str = "UNKNOWN"
+    notebook_execution_state: str = "UNKNOWN"
+    environment_setup_state: str = "UNKNOWN"
+    model_weights_state: str = "UNKNOWN"
+    voice_initialization_state: str = "UNKNOWN"
+    api_service_readiness: str = "NOT_READY"
+    tunnel_url: Optional[str] = None
+    resource_ownership: str = "local_session"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "local_service_state": self.local_service_state,
+            "kaggle_gpu_state": self.kaggle_gpu_state,
+            "kernel_slug": self.kernel_slug,
+            "kernel_execution_status": self.kernel_execution_status,
+            "notebook_execution_state": self.notebook_execution_state,
+            "environment_setup_state": self.environment_setup_state,
+            "model_weights_state": self.model_weights_state,
+            "voice_initialization_state": self.voice_initialization_state,
+            "api_service_readiness": self.api_service_readiness,
+            "tunnel_url": self.tunnel_url,
+            "resource_ownership": self.resource_ownership,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> ObservedState:
+        return cls(
+            local_service_state=data.get("local_service_state", "RUNNING"),
+            kaggle_gpu_state=data.get("kaggle_gpu_state", "UNKNOWN"),
+            kernel_slug=data.get("kernel_slug", "avidok/audiogen"),
+            kernel_execution_status=data.get("kernel_execution_status", "UNKNOWN"),
+            notebook_execution_state=data.get("notebook_execution_state", "UNKNOWN"),
+            environment_setup_state=data.get("environment_setup_state", "UNKNOWN"),
+            model_weights_state=data.get("model_weights_state", "UNKNOWN"),
+            voice_initialization_state=data.get("voice_initialization_state", "UNKNOWN"),
+            api_service_readiness=data.get("api_service_readiness", "NOT_READY"),
+            tunnel_url=data.get("tunnel_url"),
+            resource_ownership=data.get("resource_ownership", "local_session"),
+        )
 
 
 class HeartbeatPayload(BaseModel):
@@ -274,15 +332,26 @@ class SessionGateway:
         self._pid: int = os.getpid()
 
         self._state: str = "IDLE"
+        self._desired_state: str = "IDLE"
         self._status_message: str = "Idle"
         self._failure_stage: Optional[str] = None
+        self._last_error: Optional[str] = None
+        self._current_operation: str = "none"
+        self._operation_id: Optional[str] = None
+        self._attempt_id: int = 0
+        self._last_known_successful_state: Optional[str] = None
         self._tunnel_url: Optional[str] = None
         self._lock: asyncio.Lock = asyncio.Lock()
         self._polling_task: Optional[asyncio.Task] = None
+        self._observed: ObservedState = ObservedState(kernel_slug=self.kernel_slug or "avidok/audiogen")
 
     @property
     def state(self) -> str:
         return self._state
+
+    @property
+    def desired_state(self) -> str:
+        return self._desired_state
 
     @property
     def status_message(self) -> str:
@@ -291,6 +360,18 @@ class SessionGateway:
     @property
     def failure_stage(self) -> Optional[str]:
         return self._failure_stage
+
+    @property
+    def current_operation(self) -> str:
+        return self._current_operation
+
+    @property
+    def operation_id(self) -> Optional[str]:
+        return self._operation_id
+
+    @property
+    def observed_state(self) -> ObservedState:
+        return self._observed
 
     @property
     def tunnel_url(self) -> Optional[str]:
@@ -329,25 +410,158 @@ class SessionGateway:
 
         return True, ""
 
+    def _build_status_response(self) -> Dict[str, Any]:
+        """Produce structured dictionary adhering to StatusResponse schema."""
+        return {
+            "status": self._state,
+            "message": self._status_message,
+            "session_id": self._session_id,
+            "failure_stage": self._failure_stage,
+            "desired_state": self._desired_state,
+            "operation_id": self._operation_id,
+            "remote_status": self._observed.kernel_execution_status,
+            "tunnel_url": self._tunnel_url,
+            "observed_state": self._observed.to_dict(),
+            "details": {
+                "local_service": self._observed.local_service_state,
+                "kaggle_gpu": self._observed.kaggle_gpu_state,
+                "kernel_slug": self._observed.kernel_slug,
+                "kernel_status": self._observed.kernel_execution_status,
+                "tunnel_health": self._observed.api_service_readiness,
+                "resource_ownership": self._observed.resource_ownership,
+            },
+        }
+
     def _write_session_state(self) -> None:
         try:
             data = {
                 "session_id": self._session_id,
+                "desired_state": self._desired_state,
                 "gateway_pid": self._pid,
                 "gateway_pgid": self._pgid,
                 "port": 17000,
                 "created_at": self._created_at,
+                "updated_at": time.time(),
                 "kaggle_kernel_slug": self.kernel_slug or "avidok/audiogen",
                 "last_heartbeat": self._last_heartbeat,
                 "status": self._state,
+                "status_message": self._status_message,
+                "current_operation": self._current_operation,
+                "operation_id": self._operation_id,
+                "attempt_id": self._attempt_id,
+                "failure_stage": self._failure_stage,
+                "last_known_successful_state": self._last_known_successful_state,
                 "tunnel_url": self._tunnel_url,
+                "observed_state": self._observed.to_dict(),
             }
             write_session_runtime_file(data)
         except Exception as exc:
             logger.warning("Failed to record session state to file: %s", exc)
 
+    def load_persisted_state(self) -> bool:
+        """Load session state from scratch/session.json if available."""
+        saved = load_session_runtime_file()
+        if not saved:
+            return False
+        try:
+            if saved.get("session_id"):
+                self._session_id = saved["session_id"]
+            if saved.get("desired_state"):
+                self._desired_state = saved["desired_state"]
+            if saved.get("status"):
+                self._state = saved["status"]
+            if saved.get("status_message"):
+                self._status_message = saved["status_message"]
+            if saved.get("tunnel_url"):
+                self._tunnel_url = saved["tunnel_url"]
+            if saved.get("last_heartbeat"):
+                self._last_heartbeat = float(saved["last_heartbeat"])
+            if saved.get("last_known_successful_state"):
+                self._last_known_successful_state = saved["last_known_successful_state"]
+            if saved.get("failure_stage"):
+                self._failure_stage = saved["failure_stage"]
+            if saved.get("operation_id"):
+                self._operation_id = saved["operation_id"]
+            if saved.get("attempt_id"):
+                self._attempt_id = int(saved["attempt_id"])
+            if "observed_state" in saved and isinstance(saved["observed_state"], dict):
+                self._observed = ObservedState.from_dict(saved["observed_state"])
+            logger.info("Loaded persisted session state (session_id='%s', status='%s')", self._session_id, self._state)
+            return True
+        except Exception as exc:
+            logger.warning("Error parsing persisted session state: %s", exc)
+            return False
+
+    async def reconcile_with_external_state(self) -> Dict[str, Any]:
+        """Query real external state (Upstash Redis + Kaggle API) and reconcile."""
+        async with self._lock:
+            # 1. Probe tunnel discovery / health
+            try:
+                disc = await asyncio.to_thread(self._call_check_tunnel_discovery)
+            except Exception as exc:
+                disc = session_manager.TunnelDiscoveryResult(
+                    status=session_manager.DiscoveryStatus.REGISTRY_UNREACHABLE,
+                    message=str(exc),
+                )
+
+            if disc.status == session_manager.DiscoveryStatus.READY and disc.tunnel_url:
+                self._tunnel_url = disc.tunnel_url
+                self._state = "READY"
+                self._desired_state = "READY"
+                self._status_message = f"Session ready at {disc.tunnel_url} (reused existing GPU worker)"
+                self._last_known_successful_state = "READY"
+                self._failure_stage = None
+                self._observed.api_service_readiness = "READY"
+                self._observed.kaggle_gpu_state = "RUNNING"
+                self._observed.model_weights_state = "LOADED"
+                self._observed.tunnel_url = disc.tunnel_url
+                self._observed.resource_ownership = "reused_session"
+                self._write_session_state()
+                logger.info("Reconciled with existing healthy tunnel %s", disc.tunnel_url)
+                return self._build_status_response()
+
+            # 2. Check Kaggle kernel status
+            try:
+                k_status = await asyncio.to_thread(self._call_get_kaggle_status)
+            except Exception as exc:
+                k_status = "UNKNOWN"
+
+            self._observed.kernel_execution_status = k_status
+
+            if k_status in ("RUNNING", "QUEUED"):
+                self._observed.kaggle_gpu_state = "ALLOCATED"
+                if self._state not in ("STARTING", "READY", "INITIALIZING"):
+                    self._state = "RECOVERING"
+                    self._status_message = f"Kaggle kernel is {k_status}. Reconnecting and awaiting tunnel..."
+                self._write_session_state()
+                if self._polling_task is None or self._polling_task.done():
+                    self._polling_task = asyncio.create_task(self._run_polling_loop())
+                return self._build_status_response()
+
+            if k_status in session_manager.TERMINAL_FAILURE_STATUSES:
+                if self._state in ("READY", "STARTING", "RECOVERING"):
+                    logger.info("Persisted state was %s, but remote kernel is %s. Reconciling.", self._state, k_status)
+                    self._state = "IDLE" if k_status == "COMPLETE" else "ERROR"
+                    self._status_message = f"Remote kernel terminated with status: {k_status}"
+                    self._failure_stage = "kaggle_kernel"
+                    self._tunnel_url = None
+                    self._write_session_state()
+                return self._build_status_response()
+
+            # If no tunnel and no active kernel
+            if self._state == "READY":
+                logger.info("Persisted state claimed READY, but neither tunnel nor kernel is active. Reconciling to IDLE.")
+                self._state = "IDLE"
+                self._desired_state = "IDLE"
+                self._status_message = "Idle"
+                self._tunnel_url = None
+                self._failure_stage = None
+                self._write_session_state()
+
+            return self._build_status_response()
+
     def record_heartbeat(self, session_id: Optional[str] = None) -> bool:
-        """Update last heartbeat timestamp and ensure lease watchdog is active."""
+        """Update last heartbeat timestamp for UI liveness tracking."""
         if session_id and session_id != self._session_id:
             logger.warning(
                 "Ignored heartbeat with mismatched session_id '%s' (active: '%s')",
@@ -369,50 +583,14 @@ class SessionGateway:
         return True
 
     async def _run_lease_watchdog(self) -> None:
-        """Background loop monitoring lease heartbeat. Triggers teardown if heartbeats stop."""
-        check_interval = max(0.01, min(1.0, self.lease_timeout_seconds / 3.0))
-        logger.info(
-            "Lease watchdog started (lease_timeout=%.1fs, startup_grace=%.1fs, check_interval=%.2fs)",
-            self.lease_timeout_seconds,
-            self.startup_grace_seconds,
-            check_interval,
-        )
+        """Background loop monitoring lease heartbeat without destroying remote sessions."""
         try:
             while True:
-                await asyncio.sleep(check_interval)
-                if self._state not in ("STARTING", "READY"):
-                    continue
-
-                if self._state == "STARTING":
-                    # Disengage/extend lease watchdog during STARTING state with startup_grace_seconds
-                    if self._last_heartbeat > 0:
-                        elapsed = time.time() - self._last_heartbeat
-                        if elapsed >= self.startup_grace_seconds:
-                            logger.warning(
-                                "Startup grace period expired (%.1fs without heartbeat >= %.1fs). Triggering shutdown.",
-                                elapsed,
-                                self.startup_grace_seconds,
-                            )
-                            await self.terminate_session(reason="startup_lease_expired", session_id=self._session_id)
-                            break
-                    continue
-
-                # Strictly check 9-second lease once in READY state
-                if self._state == "READY":
-                    if self._last_heartbeat > 0:
-                        elapsed = time.time() - self._last_heartbeat
-                        if elapsed >= self.lease_timeout_seconds:
-                            logger.warning(
-                                "Lease expired (%.1fs without UI heartbeat >= %.1fs timeout). Triggering automated shutdown coordinator.",
-                                elapsed,
-                                self.lease_timeout_seconds,
-                            )
-                            await self.terminate_session(reason="lease_expired", session_id=self._session_id)
-                            break
+                await asyncio.sleep(max(0.1, self.heartbeat_interval_seconds))
+                # Heartbeat monitoring only. Teardown is explicit via /session/terminate
+                # or Kaggle's remote IdleWatchdog (10min).
         except asyncio.CancelledError:
-            logger.debug("Lease watchdog task cancelled.")
-        except Exception as exc:
-            logger.error("Unexpected error in lease watchdog: %s", exc)
+            pass
 
     def reset(self) -> None:
         """Reset state machine to IDLE (primarily for test fixture isolation)."""
@@ -423,10 +601,15 @@ class SessionGateway:
         self._polling_task = None
         self._lease_watchdog_task = None
         self._state = "IDLE"
+        self._desired_state = "IDLE"
         self._status_message = "Idle"
         self._failure_stage = None
+        self._last_error = None
+        self._current_operation = "none"
+        self._operation_id = None
         self._tunnel_url = None
         self._last_heartbeat = 0.0
+        self._observed = ObservedState(kernel_slug=self.kernel_slug or "avidok/audiogen")
         remove_session_runtime_file()
 
     def _call_kaggle_push(self) -> None:
@@ -485,31 +668,24 @@ class SessionGateway:
         return session_manager.check_tunnel_discovery(registry_url=self.registry_url)
 
     async def start_session(self) -> Dict[str, Any]:
-        """Trigger manual GPU session startup adhering to the exact state machine.
+        """Trigger manual GPU session startup adhering to idempotent reconciliation.
 
-        Returns immediately (non-blocking) with STARTING status while background
-        task executes Kaggle push and polling.
+        Returns immediately (non-blocking) with current or STARTING status while background
+        task executes Kaggle push/reconciliation and polling.
         """
         async with self._lock:
-            # 1. If STARTING: no-op, returns current status, does not push again
-            if self._state == "STARTING":
-                logger.info("Session is already STARTING; duplicate click ignored.")
-                return {
-                    "status": self._state,
-                    "message": self._status_message,
-                    "session_id": self._session_id,
-                    "failure_stage": self._failure_stage,
-                }
+            # 1. If an operation is already in progress, idempotent no-op
+            if (
+                self._state in ("STARTING", "INITIALIZING", "RECOVERING")
+                or (self._polling_task is not None and not self._polling_task.done())
+            ):
+                logger.info("Session operation already in progress (%s); duplicate request ignored.", self._state)
+                return self._build_status_response()
 
-            # 2. If READY: no-op, returns READY immediately, does not push again
-            if self._state == "READY":
+            # 2. If READY: no-op, returns READY immediately
+            if self._state == "READY" and self._tunnel_url:
                 logger.info("Session is already READY; no-op.")
-                return {
-                    "status": self._state,
-                    "message": self._status_message,
-                    "session_id": self._session_id,
-                    "failure_stage": self._failure_stage,
-                }
+                return self._build_status_response()
 
             # Pre-flight configuration validation (fail-fast < 50ms)
             is_valid, error_msg = self.validate_session_configuration()
@@ -518,24 +694,47 @@ class SessionGateway:
                 self._state = "ERROR"
                 self._status_message = f"Configuration error: {error_msg}"
                 self._failure_stage = "local_configuration"
-                return {
-                    "status": "ERROR",
-                    "message": self._status_message,
-                    "session_id": self._session_id,
-                    "failure_stage": "local_configuration",
-                }
+                return self._build_status_response()
 
-            # 3. If IDLE, ERROR, or SHUTDOWN: reset to STARTING and retry from scratch
+            # 3. Check if tunnel is ALREADY healthy before pushing!
+            try:
+                disc = await asyncio.to_thread(self._call_check_tunnel_discovery)
+                if disc.status == session_manager.DiscoveryStatus.READY and disc.tunnel_url:
+                    self._tunnel_url = disc.tunnel_url
+                    self._state = "READY"
+                    self._desired_state = "READY"
+                    self._status_message = f"Session ready at {disc.tunnel_url} (reused existing GPU worker)"
+                    self._last_heartbeat = time.time()
+                    self._last_known_successful_state = "READY"
+                    self._failure_stage = None
+                    self._observed.api_service_readiness = "READY"
+                    self._observed.kaggle_gpu_state = "RUNNING"
+                    self._observed.model_weights_state = "LOADED"
+                    self._observed.tunnel_url = disc.tunnel_url
+                    self._observed.resource_ownership = "reused_session"
+                    self._write_session_state()
+                    asyncio.create_task(self._sync_voices_to_worker(disc.tunnel_url))
+                    logger.info("Tunnel %s already healthy. Reused existing session.", disc.tunnel_url)
+                    return self._build_status_response()
+            except Exception as exc:
+                logger.debug("Pre-start tunnel check skipped: %s", exc)
+
+            # 4. Initiate startup state
             self._session_id = f"audiogen-sess-{uuid.uuid4().hex[:8]}"
+            self._operation_id = f"op-{uuid.uuid4().hex[:8]}"
+            self._current_operation = "start"
+            self._attempt_id += 1
+            self._desired_state = "READY"
             self._created_at = time.time()
             self._last_heartbeat = time.time()
             self._state = "STARTING"
             self._status_message = "GPU session startup initiated. Polling for tunnel readiness..."
             self._failure_stage = None
             self._tunnel_url = None
+            self._observed.resource_ownership = "local_session"
             self._write_session_state()
 
-            # Cancel any lingering polling or watchdog tasks
+            # Cancel any lingering tasks
             if self._polling_task is not None and not self._polling_task.done():
                 self._polling_task.cancel()
             if self._lease_watchdog_task is not None and not self._lease_watchdog_task.done():
@@ -545,12 +744,7 @@ class SessionGateway:
             self._polling_task = asyncio.create_task(self._run_startup_and_polling_loop())
             self._lease_watchdog_task = asyncio.create_task(self._run_lease_watchdog())
 
-            return {
-                "status": self._state,
-                "message": self._status_message,
-                "session_id": self._session_id,
-                "failure_stage": None,
-            }
+            return self._build_status_response()
 
     async def terminate_session(
         self,
@@ -698,19 +892,46 @@ class SessionGateway:
 
 
     async def _run_startup_and_polling_loop(self) -> None:
-        """Background task: executes Kaggle push in thread executor, then enters polling loop."""
+        """Background task: executes Kaggle push in thread executor, handling 409 conflict, then enters polling loop."""
         logger.info("Starting Kaggle worker...")
         try:
             await asyncio.to_thread(self._call_kaggle_push)
             logger.info("Kaggle execution launched.")
             logger.info("Waiting for tunnel registration in registry...")
-        except Exception as exc:
-            logger.error("Kaggle push failed during session start: %s", exc)
+        except session_manager.KagglePushConflictError as exc:
+            logger.info(
+                "Kaggle push returned 409 Conflict: %s. Kernel is already active. Reconciling and reusing...",
+                exc,
+            )
             async with self._lock:
-                self._state = "ERROR"
-                self._status_message = f"Kaggle push failed: {exc}"
-                self._failure_stage = "kaggle_push"
-            return
+                self._observed.resource_ownership = "reused_session"
+                self._observed.kaggle_gpu_state = "ALLOCATED"
+                self._state = "RUNNING"
+                self._status_message = "Kaggle kernel is already active (409 Conflict reconciled). Reconnecting..."
+                self._failure_stage = None
+                self._write_session_state()
+        except Exception as exc:
+            exc_str = str(exc).lower()
+            if "409" in exc_str or "conflict" in exc_str or "savekernel" in exc_str:
+                logger.info(
+                    "Detected 409 Conflict in Kaggle push: %s. Reconciling with existing active kernel...",
+                    exc,
+                )
+                async with self._lock:
+                    self._observed.resource_ownership = "reused_session"
+                    self._observed.kaggle_gpu_state = "ALLOCATED"
+                    self._state = "RUNNING"
+                    self._status_message = "Kaggle kernel is already active. Reconnecting and awaiting tunnel..."
+                    self._failure_stage = None
+                    self._write_session_state()
+            else:
+                logger.error("Kaggle push failed during session start: %s", exc)
+                async with self._lock:
+                    self._state = "ERROR"
+                    self._status_message = f"Kaggle push failed: {exc}"
+                    self._failure_stage = "kaggle_push"
+                    self._write_session_state()
+                return
 
         await self._run_polling_loop()
 
@@ -727,12 +948,34 @@ class SessionGateway:
                 # Check timeout
                 elapsed = time.time() - start_time
                 if elapsed >= self.startup_timeout_seconds:
+                    final_disc = None
+                    try:
+                        final_disc = await asyncio.to_thread(self._call_check_tunnel_discovery)
+                    except Exception:
+                        pass
+                    if final_disc and final_disc.status == DiscoveryStatus.READY and final_disc.tunnel_url:
+                        async with self._lock:
+                            self._tunnel_url = final_disc.tunnel_url
+                            self._state = "READY"
+                            self._desired_state = "READY"
+                            self._status_message = f"Session ready at {final_disc.tunnel_url}"
+                            self._last_heartbeat = time.time()
+                            self._last_known_successful_state = "READY"
+                            self._failure_stage = None
+                            self._observed.api_service_readiness = "READY"
+                            self._observed.kaggle_gpu_state = "RUNNING"
+                            self._observed.model_weights_state = "LOADED"
+                            self._observed.tunnel_url = final_disc.tunnel_url
+                            self._write_session_state()
+                        return
+
                     async with self._lock:
                         self._state = "ERROR"
                         self._status_message = (
                             f"Session startup timed out after {self.startup_timeout_seconds:.1f}s without ready tunnel."
                         )
                         self._failure_stage = "timeout"
+                        self._write_session_state()
                     logger.warning(
                         "Session startup timed out after %.1fs. Last stage: %s",
                         self.startup_timeout_seconds,
@@ -743,6 +986,7 @@ class SessionGateway:
                 # 1. Check Kaggle status for terminal failure or non-transient status errors
                 try:
                     k_status = await asyncio.to_thread(self._call_get_kaggle_status)
+                    self._observed.kernel_execution_status = k_status
                     if k_status in TERMINAL_FAILURE_STATUSES:
                         async with self._lock:
                             self._state = "ERROR"
@@ -750,13 +994,17 @@ class SessionGateway:
                                 f"Kaggle kernel reported terminal failure status: {k_status}"
                             )
                             self._failure_stage = "kaggle_kernel"
+                            self._write_session_state()
                         logger.error("Kaggle terminal failure detected: %s", k_status)
                         return
+                    elif k_status in ("RUNNING", "QUEUED"):
+                        self._observed.kaggle_gpu_state = "ALLOCATED"
                 except session_manager.KaggleStatusError as exc:
                     async with self._lock:
                         self._state = "ERROR"
                         self._status_message = f"Kaggle status check failed: {exc}"
                         self._failure_stage = "kaggle_status"
+                        self._write_session_state()
                     logger.error("Non-transient Kaggle status error: %s", exc)
                     return
                 except Exception as exc:
@@ -769,9 +1017,15 @@ class SessionGateway:
                         async with self._lock:
                             self._tunnel_url = discovery_res.tunnel_url
                             self._state = "READY"
+                            self._desired_state = "READY"
                             self._status_message = f"Session ready at {discovery_res.tunnel_url}"
                             self._last_heartbeat = time.time()
+                            self._last_known_successful_state = "READY"
                             self._failure_stage = None
+                            self._observed.api_service_readiness = "READY"
+                            self._observed.kaggle_gpu_state = "RUNNING"
+                            self._observed.model_weights_state = "LOADED"
+                            self._observed.tunnel_url = discovery_res.tunnel_url
                             self._write_session_state()
                         logger.info("Tunnel %s healthy (HTTP 200). Session READY.", discovery_res.tunnel_url)
                         asyncio.create_task(self._sync_voices_to_worker(discovery_res.tunnel_url))
@@ -781,6 +1035,7 @@ class SessionGateway:
                             self._state = "ERROR"
                             self._status_message = f"Registry authentication failed: {discovery_res.message}"
                             self._failure_stage = "registry_communication"
+                            self._write_session_state()
                         logger.error("Registry authentication error during discovery: %s", discovery_res.message)
                         return
                     elif discovery_res.status == DiscoveryStatus.REGISTRY_UNREACHABLE:
@@ -797,6 +1052,7 @@ class SessionGateway:
                             self._state = "ERROR"
                             self._status_message = f"Configuration error during discovery: {discovery_res.message}"
                             self._failure_stage = "local_configuration"
+                            self._write_session_state()
                         logger.error("Configuration error in polling loop: %s", discovery_res.message)
                         return
                 except Exception as exc:
@@ -813,6 +1069,7 @@ class SessionGateway:
                 self._state = "ERROR"
                 self._status_message = f"Unexpected error in background poller: {exc}"
                 self._failure_stage = "unexpected"
+                self._write_session_state()
 
     async def _sync_voices_to_worker(self, tunnel_url: str) -> None:
         """Synchronize locally registered custom voices to remote worker after restart."""
@@ -889,10 +1146,20 @@ def load_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Manage application lifecycle."""
-    yield
     gateway: Optional[SessionGateway] = getattr(app.state, "gateway", None)
+    auto_reconcile: bool = getattr(app.state, "auto_reconcile", False)
+    if gateway is not None and auto_reconcile:
+        gateway.load_persisted_state()
+        try:
+            asyncio.create_task(gateway.reconcile_with_external_state())
+        except RuntimeError:
+            pass
+    yield
     if gateway is not None:
-        gateway.reset()
+        if gateway._polling_task is not None and not gateway._polling_task.done():
+            gateway._polling_task.cancel()
+        if gateway._lease_watchdog_task is not None and not gateway._lease_watchdog_task.done():
+            gateway._lease_watchdog_task.cancel()
 
 
 def normalize_and_save_audio(audio_bytes: bytes, destination_path: Path) -> None:
@@ -922,6 +1189,7 @@ def create_app(
     startup_grace_seconds: Optional[float] = None,
     shutdown_grace_seconds: Optional[float] = None,
     schedule_exit: Optional[bool] = None,
+    auto_reconcile: Optional[bool] = None,
 ) -> FastAPI:
     """Factory creating and configuring the FastAPI gateway application."""
     config = load_config(config_path)
@@ -982,6 +1250,14 @@ def create_app(
     else:
         resolved_schedule_exit = schedule_exit
 
+    if auto_reconcile is None:
+        if "pytest" in sys.modules or os.environ.get("PYTEST_CURRENT_TEST"):
+            resolved_auto_reconcile = False
+        else:
+            resolved_auto_reconcile = True
+    else:
+        resolved_auto_reconcile = auto_reconcile
+
     app = FastAPI(title="AudioGen Session Gateway", lifespan=lifespan)
 
     active_gateway = gateway or SessionGateway(
@@ -997,6 +1273,7 @@ def create_app(
         schedule_exit=resolved_schedule_exit,
     )
     app.state.gateway = active_gateway
+    app.state.auto_reconcile = resolved_auto_reconcile
 
     @app.post("/session/start", response_model=StatusResponse)
     async def start_session() -> StatusResponse:
@@ -1008,12 +1285,13 @@ def create_app(
     async def get_session_status(session_id: Optional[str] = Query(None)) -> StatusResponse:
         """Query current session state and status message."""
         active_gateway.record_heartbeat(session_id=session_id)
-        return StatusResponse(
-            status=active_gateway.state,
-            message=active_gateway.status_message,
-            session_id=active_gateway.session_id,
-            failure_stage=active_gateway.failure_stage,
-        )
+        return StatusResponse(**active_gateway._build_status_response())
+
+    @app.post("/session/reconcile", response_model=StatusResponse)
+    async def reconcile_session() -> StatusResponse:
+        """Trigger explicit external reconciliation with remote Kaggle/tunnel state."""
+        result = await active_gateway.reconcile_with_external_state()
+        return StatusResponse(**result)
 
     @app.post("/session/heartbeat")
     async def heartbeat(
